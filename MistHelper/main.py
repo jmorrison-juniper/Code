@@ -306,16 +306,33 @@ def prompt_user_to_select_device_id(site_id, device_type="all", csv_filename="Si
 
     table = PrettyTable()
     table.field_names = ["Index", "name", "mac", "model", "serial"]
+    index_to_device = {}
+    name_to_device = {}
+
     for idx, item in enumerate(inventory):
         table.add_row([idx, item.get("name", ""), item.get("mac", ""), item.get("model", ""), item.get("serial", "")])
+        index_to_device[idx] = item
+        name_to_device[item.get("name", "")] = item
+
     print(table)
 
-    try:
-        selected_index = int(input("Enter the index of the device to view detailed stats: "))
-        return inventory[selected_index].get("id")
-    except (ValueError, IndexError):
-        logging.warning("Invalid selection. Please enter a valid index number.")
-        return None
+    user_input = input("Enter the index or name of the device to view device: ").strip()
+
+    # Try index
+    if user_input.isdigit():
+        idx = int(user_input)
+        if idx in index_to_device:
+            return index_to_device[idx].get("id")
+        else:
+            logging.warning("❌ Invalid index.")
+            return None
+
+    # Try name
+    if user_input in name_to_device:
+        return name_to_device[user_input].get("id")
+
+    logging.warning("❌ Device not found by name or index.")
+    return None
 
 def show_site_device_inventory(site_id, device_type="all", csv_filename="SiteInventory.csv"):
     rawdata = mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id, type=device_type).data
@@ -331,10 +348,17 @@ def show_site_device_inventory(site_id, device_type="all", csv_filename="SiteInv
 
     table = PrettyTable()
     table.field_names = fields
-    table.sortby = "model" if "model" in fields else None
+
+    if "model" in fields:
+        try:
+            table.sortby = "model"
+        except Exception as e:
+            logging.warning(f"⚠️ Could not sort table by 'model': {e}")
+
     for item in inventory:
         row = [item.get(field, "") for field in fields]
         table.add_row(row)
+
     logging.info("\n" + table.get_string())
 
 def prompt_user_to_select_site_id_from_csv(csv_file="SiteList.csv"):

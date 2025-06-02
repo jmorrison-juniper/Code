@@ -21,3 +21,8 @@ MistEdgeEventDefinitions.csv
 OtherEventDefinitions.csv
 .gitignore
 OrgInventory.csv
+DeviceConfig.csv
+DeviceStats.csv
+DeviceTestResults.csv
+OrgVPNPeerStats.csv
+SiteInventory.csv
