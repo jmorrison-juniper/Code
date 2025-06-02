@@ -1,4 +1,4 @@
-import mistapi,csv,ast,json,time, logging, os
+import mistapi, csv, ast, json, time, logging, os, argparse, sys
 from prettytable import PrettyTable
 from tqdm import tqdm
 from datetime import datetime, timedelta
@@ -99,10 +99,6 @@ def interactive_device_action(fetch_function, filename, description, device_type
     # Display the data in a table
     display_pretty_table(stats)
 
-def check_and_generate_csv(file_name, generate_function):
-    if not os.path.exists(file_name):
-        generate_function()
-
 def process_and_merge_csv_for_sfp_address():
      # Automatically generate missing files
     if not os.path.exists('OrgDevicePortStats.csv'):
@@ -157,11 +153,26 @@ def process_and_merge_csv_for_sfp_address():
     print(f"✅ Merged data written to {output_file}")
 
 def get_org_id():
-    global org_id  # Use the global org_id variable
-    if org_id is None:
-        # Select organization and get its ID
-        org_id_list = mistapi.cli.select_org(apisession)
-        org_id = org_id_list[0]
+    global org_id
+    if org_id:
+        return org_id
+
+    # Try to load from .env if not already set
+    try:
+        with open(".env", "r") as f:
+            for line in f:
+                if line.strip().startswith("MIST_ORG_ID="):
+                    org_id = line.strip().split("=", 1)[1].strip().strip('"')
+                    if org_id:
+                        logging.info(f"✅ Loaded org_id from .env: {org_id}")
+                        return org_id
+    except FileNotFoundError:
+        logging.warning("⚠️ .env file not found.")
+
+    # Prompt if still not set
+    logging.info("🔍 No org_id found in .env or CLI. Prompting user...")
+    org_id_list = mistapi.cli.select_org(apisession)
+    org_id = org_id_list[0]
     return org_id
 
 def flatten_nested_dict(d, parent_key='', sep='_'):
@@ -830,6 +841,7 @@ def export_all_devices_with_site_info():
 
 def generate_support_package():
     logging.info("Generating support package for each site...")
+
     # List of required CSV files and their generation functions
     required_files = [
         ("OrgAlarms.csv", search_org_alarms),
@@ -839,27 +851,35 @@ def generate_support_package():
         ("OrgDeviceStats.csv", export_org_device_statistics),
         ("OrgDevicePortStats.csv", export_org_device_port_stats),
         ("AllGatewayTestResults.csv", export_all_gateway_test_results_by_site),
-        ]
-# Loop through each file and ensure it's fresh or regenerate it
+    ]
+
+    # Ensure all required files are fresh or regenerate them
     for filename, func in required_files:
         check_and_generate_csv(filename, func, freshness_minutes=15)
+
+    # Ensure SiteList.csv is generated before loading
+    check_and_generate_csv('SiteList.csv', export_org_site_list, freshness_minutes=15)
+
     # Load the pulled data into dictionaries
-        site_data = load_csv_into_dict('SiteList.csv', 'id')
-        alarms_data = load_csv_into_dict('OrgAlarms.csv', 'site_id')
-        events_data = load_csv_into_dict('OrgDeviceEvents.csv', 'site_id')
-        devices_data = load_csv_into_dict('OrgDevices.csv', 'name')
-        device_stats_data = load_csv_into_dict('OrgDeviceStats.csv', 'site_id')
-        port_stats_data = load_csv_into_dict('OrgDevicePortStats.csv', 'site_id')
+    site_data = load_csv_into_dict('SiteList.csv', 'id')
+    alarms_data = load_csv_into_dict('OrgAlarms.csv', 'site_id')
+    events_data = load_csv_into_dict('OrgDeviceEvents.csv', 'site_id')
+    devices_data = load_csv_into_dict('OrgDevices.csv', 'name')
+    device_stats_data = load_csv_into_dict('OrgDeviceStats.csv', 'site_id')
+    port_stats_data = load_csv_into_dict('OrgDevicePortStats.csv', 'site_id')
+
     if os.path.exists('AllGatewayTestResults.csv'):
         speedtest_data = load_csv_into_dict('AllGatewayTestResults.csv', 'site_id')
     else:
         logging.warning("⚠️ AllGatewayTestResults.csv not found. Skipping speedtest data.")
         speedtest_data = {}
+
     # Create a support package for each site with alarms or events
     for site_id, site_info in site_data.items():
         if not alarms_data.get(site_id) and not events_data.get(site_id):
             logging.info(f"Skipping site {site_id} — no alarms or events.")
             continue
+
         logging.info(f"Generating support package for site: {site_id}")
         support_data = {
             'alarms': alarms_data.get(site_id, []),
@@ -869,8 +889,10 @@ def generate_support_package():
             'port_stats': port_stats_data.get(site_id, []),
             'speedtests': speedtest_data.get(site_id, []),
         }
+
         support_package_filename = f"SupportPackage_{site_id}.csv"
         write_support_package_to_csv(support_data, support_package_filename)
+
     logging.info("✅ Support packages generated for applicable sites.")
     logging.info("✅ Support packages generated for all sites!")
 
@@ -947,7 +969,6 @@ def poll_marvis_actions():
     print(f"✅ {len(open_actions)} open Marvis actions written to OpenMarvisActions.csv")
 
 
-
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -993,19 +1014,62 @@ menu_actions = {
     "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV")
 }
 
+# --- CLI Argument Parsing ---
+parser = argparse.ArgumentParser(description="MistHelper CLI Interface")
+parser.add_argument("-O", "--org", help="Organization ID")
+parser.add_argument("-M", "--menu", help="Menu option number to execute")
+parser.add_argument("-S", "--site", help="Human-readable site name")
+parser.add_argument("-D", "--device", help="Human-readable device name")
+parser.add_argument("-P", "--port", help="Port ID")
 
+args = parser.parse_args()
 
-# --- Menu Display ---
-print("\nAvailable Options:")
-for key, (func, description) in menu_actions.items():
-    print(f"{key}: {description}")
+# If any CLI args are passed, override interactive mode
+if len(sys.argv) > 1:
+    if args.org:
+        org_id = args.org  # Override global org_id
 
-iwant = input("\nEnter your selection number now: ")
+    # Resolve site name to site_id if needed
+    if args.site:
+        sites = mistapi.get_all(mistapi.api.v1.orgs.sites.listOrgSites(apisession, org_id), apisession)
+        site_lookup = {site["name"]: site["id"] for site in sites}
+        site_id = site_lookup.get(args.site)
+        if not site_id:
+            print(f"❌ Site name '{args.site}' not found.")
+            sys.exit(1)
+    else:
+        site_id = None
 
-# --- Execute Selected Action ---
-selected = menu_actions.get(iwant)
-if selected:
-    func, _ = selected
-    func()
-else:
-    print("Invalid selection. Please try again.")
+    # Resolve device name to device_id if needed
+    if args.device and site_id:
+        devices = mistapi.get_all(mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id), apisession)
+        device_lookup = {dev["name"]: dev["id"] for dev in devices}
+        device_id = device_lookup.get(args.device)
+        if not device_id:
+            print(f"❌ Device name '{args.device}' not found at site '{args.site}'.")
+            sys.exit(1)
+    else:
+        device_id = None
+
+    # Execute the selected menu action
+    if args.menu in menu_actions:
+        func, _ = menu_actions[args.menu]
+        func()
+    else:
+        print(f"❌ Invalid menu option: {args.menu}")
+        sys.exit(1)
+
+    sys.exit(0)  # Exit after CLI execution
+
+# --- Interactive Menu Fallback ---
+if len(sys.argv) == 1:
+    print("\nAvailable Options:")
+    for key, (func, description) in menu_actions.items():
+        print(f"{key}: {description}")
+    iwant = input("\nEnter your selection number now: ").strip()
+    selected = menu_actions.get(iwant)
+    if selected:
+        func, _ = selected
+        func()
+    else:
+        print("Invalid selection. Please try again.")
