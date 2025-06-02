@@ -3,3 +3,12 @@ MistHelper/main - Copy.py
 MistHelper/__pycache__/mistapi_lib.cpython-313.pyc
 OrgDevices.csv
 script.log
+OrgAlarms.csv
+OrgDeviceEvents.csv
+SiteList.csv
+OrgDevicePortStats.csv
+OrgDeviceStats.csv
+AllGatewayTestResults.csv
+sample.env
+DeviceEventDefinitions.csv
+ClientEventDefinitions.csv
