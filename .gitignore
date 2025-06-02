@@ -12,3 +12,12 @@ AllGatewayTestResults.csv
 sample.env
 DeviceEventDefinitions.csv
 ClientEventDefinitions.csv
+SystemEventDefinitions.csv
+.gitignore
+AlarmDefinitions.csv
+OrgAuditLogs.csv
+NacEventDefinitions.csv
+MistEdgeEventDefinitions.csv
+OtherEventDefinitions.csv
+.gitignore
+OrgInventory.csv

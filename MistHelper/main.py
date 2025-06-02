@@ -24,6 +24,22 @@ org_id=None
 
 print(mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data)
 
+def check_and_generate_csv(file_name, generate_function, freshness_minutes=15):
+    from datetime import datetime, timedelta
+    import os
+
+    if os.path.exists(file_name):
+        file_mtime = datetime.fromtimestamp(os.path.getmtime(file_name))
+        if datetime.now() - file_mtime < timedelta(minutes=freshness_minutes):
+            logging.info(f"✅ Using cached {file_name} (fresh)")
+            return
+        else:
+            logging.info(f"♻️ {file_name} is older than {freshness_minutes} minutes. Regenerating...")
+    else:
+        logging.info(f"📄 {file_name} not found. Generating...")
+
+    generate_function()
+
 def prepare_and_write_csv(data, filename, sort_key=None):
     """
     Flattens, sanitizes, optionally sorts, and writes data to a CSV file.
@@ -74,7 +90,7 @@ def interactive_device_action(fetch_function, filename, description, device_type
     and writes the result to a CSV file.
     """
     # Prompt user to select a site
-    site_id = prompt_user_to_select_site_id()
+    site_id = prompt_user_to_select_site_id_from_csv()
     if not site_id:
         return
 
@@ -321,24 +337,50 @@ def show_site_device_inventory(site_id, device_type="all", csv_filename="SiteInv
         table.add_row(row)
     logging.info("\n" + table.get_string())
 
-def prompt_user_to_select_site_id():
+def prompt_user_to_select_site_id_from_csv(csv_file="SiteList.csv"):
     """
-    Prompts the user to select a site and returns the first selected site ID.
-    Returns None if no site is selected.
+    Prompts the user to select a site by index or name from SiteList.csv.
+    Returns the corresponding site ID.
     """
-    site_id_list = mistapi.cli.select_site(apisession)
-    if site_id_list:
-        site_id = site_id_list[0]
-        print(f"Selected Site ID: {site_id}")
+    check_and_generate_csv(csv_file, export_org_site_list)
+
+    with open(csv_file, mode='r', encoding='utf-8') as file:
+        reader = list(csv.DictReader(file))
+        index_to_site = {i: row for i, row in enumerate(reader)}
+        name_to_site = {row["name"]: row for row in reader if "name" in row}
+
+    print("\nAvailable Sites:")
+    for idx, row in index_to_site.items():
+        print(f"[{idx}] {row.get('name', 'Unnamed')}")
+
+    user_input = input("\nEnter site index or name: ").strip()
+
+    # Try index
+    if user_input.isdigit():
+        idx = int(user_input)
+        if idx in index_to_site:
+            site_id = index_to_site[idx].get("id")
+            print(f"✅ Selected site: {index_to_site[idx].get('name')} (ID: {site_id})")
+            return site_id
+        else:
+            print("❌ Invalid index.")
+            return None
+
+    # Try name
+    if user_input in name_to_site:
+        site_id = name_to_site[user_input].get("id")
+        print(f"✅ Selected site: {user_input} (ID: {site_id})")
         return site_id
-    else:
-        print("No site selected.")
-        return None
+
+    print("❌ Site not found by name or index.")
+    return None
 
 def select_site():
-    site_id_list = sorted(mistapi.cli.select_site(apisession))
-    site_id = site_id_list[0]
-    logging.info(f"Site id: {site_id}")
+    site_id = prompt_user_to_select_site_id_from_csv()
+    if site_id:
+        logging.info(f"✅ Selected site ID: {site_id}")
+    else:
+        logging.warning("❌ No site selected.")
 
 def search_org_alarms():
     fetch_process_and_display_data(
@@ -431,7 +473,7 @@ def export_org_vpn_peer_stats():
 
 def interactive_view_site_inventory():
     print("Select a Site to View Device Inventory:")
-    site_id = prompt_user_to_select_site_id()
+    site_id = prompt_user_to_select_site_id_from_csv()
     if site_id:
         show_site_device_inventory(site_id)
 
