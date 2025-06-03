@@ -4,7 +4,7 @@ Use the sample .ENV file to setup your org specific ID and API token.
 
 
 Flag	    Purpose	        Example
--O	    Set org_id	-O "a8c903ae-e6d0-42a7-b815-fe395dea8017"
+-O	    Set org_id	-O "abc123"
 
 -M	    Menu option number	    -M 29
 
