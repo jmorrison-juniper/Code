@@ -1034,6 +1034,36 @@ def poll_marvis_actions():
     write_data_to_csv(data, "OpenMarvisActions.csv")
     print(f"✅ {len(open_actions)} open Marvis actions written to OpenMarvisActions.csv")
 
+def export_current_guests():
+    """
+    Export all current guest users in the org to OrgCurrentGuests.csv
+    """
+    logging.info("Exporting all current guest users in the org...")
+    org_id = get_org_id()
+    response = mistapi.api.v1.orgs.guests.searchOrgGuestAuthorization(apisession, org_id, limit=1000)
+    guests = mistapi.get_all(response=response, mist_session=apisession)
+    guests = flatten_all_nested_fields(guests)
+    guests = escape_multiline_strings(guests)
+    write_data_to_csv(guests, "OrgCurrentGuests.csv")
+    logging.info("✅ Current guests exported to OrgCurrentGuests.csv")
+
+def export_historical_guests():
+    """
+    Export all guest users from the last 7 days to OrgHistoricalGuests.csv
+    """
+    logging.info("Exporting all guest users from the last 7 days...")
+    org_id = get_org_id()
+    # Calculate epoch for 7 days ago
+    end_time = int(time.time())
+    start_time = end_time - 7 * 24 * 3600
+    response = mistapi.api.v1.orgs.guests.searchOrgGuestAuthorization(
+        apisession, org_id, limit=1000, start=start_time, end=end_time
+    )
+    guests = mistapi.get_all(response=response, mist_session=apisession)
+    guests = flatten_all_nested_fields(guests)
+    guests = escape_multiline_strings(guests)
+    write_data_to_csv(guests, "OrgHistoricalGuests.csv")
+    logging.info("✅ Historical guests exported to OrgHistoricalGuests.csv")
 
 menu_actions = {
     # 🗂️ Setup & Core Logs
@@ -1077,7 +1107,11 @@ menu_actions = {
     "27": (export_all_devices_with_site_info, "Export a list of all devices with associated site and address info"),
     "28": (process_and_merge_csv_for_sfp_address, "Process and merge CSV files of SFP Module locations into a single CSV file"),
     "29": (generate_support_package, "Generate support package for each site"),
-    "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV")
+    "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV"),
+     "31": (
+        lambda: (export_current_guests(), export_historical_guests()),
+        "Export all current guest users and last 7 days of historical guests to CSV"
+    )
 }
 
 # --- CLI Argument Parsing ---
