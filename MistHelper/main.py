@@ -1065,6 +1065,53 @@ def export_historical_guests():
     write_data_to_csv(guests, "OrgHistoricalGuests.csv")
     logging.info("✅ Historical guests exported to OrgHistoricalGuests.csv")
 
+def export_all_switch_vc_stats():
+    """
+    Export virtual chassis stats (including stacking cable info) for all switches in the org.
+    """
+    logging.info("Exporting all switch virtual chassis stats...")
+
+    # Ensure OrgInventory.csv is fresh
+    check_and_generate_csv("OrgInventory.csv", export_org_device_inventory, freshness_minutes=15)
+
+    # Load OrgInventory.csv and filter for switches
+    with open("OrgInventory.csv", mode="r", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        switches = [row for row in reader if row.get("type") == "switch"]
+
+    if not switches:
+        logging.warning("No switches found in OrgInventory.csv.")
+        return
+
+    all_vc_stats = []
+
+    for switch in tqdm(switches, desc="Switches", unit="switch"):
+        site_id = switch.get("site_id")
+        device_id = switch.get("id")
+        name = switch.get("name", "")
+        mac = switch.get("mac", "")
+        model = switch.get("model", "")
+        serial = switch.get("serial", "")
+
+        if not site_id or not device_id:
+            continue
+
+        try:
+            # Get VC stats for this switch (returns a flat dict)
+            vc_stats = mistapi.api.v1.sites.devices.getSiteDeviceVirtualChassis(apisession, site_id, device_id).data
+            # Merge all switch info and VC info into a single dictionary
+            entry = {**switch, **vc_stats}
+            all_vc_stats.append(entry)
+        except Exception as e:
+            logging.warning(f"Failed to fetch VC stats for switch {name} ({device_id}): {e}")
+
+    # Flatten and write to CSV
+    all_vc_stats = flatten_all_nested_fields(all_vc_stats)
+    all_vc_stats = escape_multiline_strings(all_vc_stats)
+    write_data_to_csv(all_vc_stats, "OrgSwitchVCStats.csv")
+    logging.info(PrettyTable(all_vc_stats))
+    logging.info("✅ Switch VC stats exported to OrgSwitchVCStats.csv")
+
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -1108,10 +1155,8 @@ menu_actions = {
     "28": (process_and_merge_csv_for_sfp_address, "Process and merge CSV files of SFP Module locations into a single CSV file"),
     "29": (generate_support_package, "Generate support package for each site"),
     "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV"),
-     "31": (
-        lambda: (export_current_guests(), export_historical_guests()),
-        "Export all current guest users and last 7 days of historical guests to CSV"
-    )
+    "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
+    "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV")
 }
 
 # --- CLI Argument Parsing ---
