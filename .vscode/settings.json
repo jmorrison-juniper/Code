@@ -1,0 +1,14 @@
+{
+    "python.testing.pytestArgs": [
+        "MistHelper"
+    ],
+    "python.testing.unittestEnabled": true,
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestArgs": [
+        "-v",
+        "-s",
+        "./MistHelper",
+        "-p",
+        "*test*.py"
+    ]
+}
