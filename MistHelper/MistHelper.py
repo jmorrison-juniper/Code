@@ -1622,6 +1622,9 @@ def run_interactive_shell(shell_url, debug=False):
     from sshkeyboard import listen_keyboard, stop_listening
     import websocket
 
+    if debug:
+        websocket.enableTrace(True)
+
     print("🔌 Connecting to WebSocket shell...")
     ws = websocket.create_connection(shell_url)
     print("🟢 Connected.")
@@ -1637,13 +1640,12 @@ def run_interactive_shell(shell_url, debug=False):
         while ws.connected:
             try:
                 data = ws.recv()
+                if isinstance(data, bytes):
+                    data = data.decode('utf-8', errors='ignore')
                 if debug:
-                    print(f"[DEBUG] Raw recv: {repr(data)}")
-                if data:
-                    line = data.decode('utf-8', errors='ignore')
-                    output = re.sub('[\x00]', '', line)
-                    sys.stdout.write(output)
-                    sys.stdout.flush()
+                    print(f"[DEBUG] Received: {repr(data)}")
+                sys.stdout.write(data)
+                sys.stdout.flush()
             except Exception as e:
                 print(f'\n## Connection lost: {e} ##')
                 return
@@ -1673,16 +1675,21 @@ def run_interactive_shell(shell_url, debug=False):
                 print(f'\n## Send failed: {e} ##')
                 return
 
+    # Send terminal size first
     _resize()
+
+    # Start receiving thread
     threading.Thread(target=_ws_in).start()
 
-    # 🔧 Delay and newline to trigger prompt
-    time.sleep(1)
-    ws.send_binary(bytearray(map(ord, "\00\n")))
+    # Wake up SSR prompt
+    time.sleep(0.5)
+    ws.send_binary(bytearray(map(ord, "\00\n\n")))
     if debug:
-        print("[DEBUG] Sent initial newline to trigger prompt")
+        print("[DEBUG] Sent wakeup sequence")
 
     listen_keyboard(on_release=_ws_out, delay_second_char=0, delay_other_chars=0, lower=False)
+
+
 
 def launch_cli_shell(site_id=None, device_id=None, debug=False):
     site_id, device_id = select_site_and_device(site_id, device_id)
