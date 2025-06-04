@@ -1,7 +1,8 @@
-import mistapi, csv, ast, json, time, logging, os, argparse, sys
+import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil
 from prettytable import PrettyTable
 from tqdm import tqdm
 from datetime import datetime, timedelta
+from sshkeyboard import listen_keyboard, stop_listening
 
 logging.basicConfig(
     filename='script.log',
@@ -1586,6 +1587,112 @@ def export_all_switch_vc_stats():
             table.add_row([row.get(f, "") for f in table.field_names])
         logging.info("\n" + table.get_string())
 
+def select_site_and_device(site_id=None, device_id=None):
+    """
+    Returns site_id and device_id, either from arguments or via interactive prompts.
+    """
+    if not site_id:
+        site_id = prompt_user_to_select_site_id_from_csv()
+        if not site_id:
+            print("❌ No site selected.")
+            return None, None
+
+    if not device_id:
+        device_id = prompt_user_to_select_device_id(site_id, device_type=device_type)
+        if not device_id:
+            print("❌ No device selected.")
+            return None, None
+
+    return site_id, device_id
+
+def create_shell_session(site_id, device_id):
+    """
+    Creates a shell session and returns the WebSocket URL.
+    """
+    try:
+        resp = mistapi.api.v1.sites.devices.createSiteDeviceShellSession(apisession, site_id, device_id)
+        shell_data = resp.data
+        return shell_data.get("url")
+    except Exception as e:
+        print(f"❌ Failed to create shell session: {e}")
+        return None
+
+def run_interactive_shell(shell_url, debug=False):
+    import json, re, sys, shutil, threading, time
+    from sshkeyboard import listen_keyboard, stop_listening
+    import websocket
+
+    print("🔌 Connecting to WebSocket shell...")
+    ws = websocket.create_connection(shell_url)
+    print("🟢 Connected.")
+
+    def _resize():
+        cols, rows = shutil.get_terminal_size()
+        resize_msg = json.dumps({'resize': {'width': cols, 'height': rows}})
+        if debug:
+            print(f"[DEBUG] Sending resize: {resize_msg}")
+        ws.send(resize_msg)
+
+    def _ws_in():
+        while ws.connected:
+            try:
+                data = ws.recv()
+                if debug:
+                    print(f"[DEBUG] Raw recv: {repr(data)}")
+                if data:
+                    line = data.decode('utf-8', errors='ignore')
+                    output = re.sub('[\x00]', '', line)
+                    sys.stdout.write(output)
+                    sys.stdout.flush()
+            except Exception as e:
+                print(f'\n## Connection lost: {e} ##')
+                return
+
+    def _ws_out(key):
+        if ws.connected:
+            keymap = {
+                "enter": "\n", "space": " ", "tab": "\t",
+                "up": "\x00\x1b[A", "down": "\x00\x1b[B",
+                "left": "\x00\x1b[D", "right": "\x00\x1b[C",
+                "backspace": "\x08"
+            }
+            if key == "~":
+                print('\n## Exit from shell ##')
+                ws.sock.shutdown(2)
+                ws.sock.close()
+                stop_listening()
+                return
+            k = keymap.get(key, key)
+            data = f"\00{k}"
+            data_byte = bytearray(map(ord, data))
+            if debug:
+                print(f"[DEBUG] Sending: {repr(data)}")
+            try:
+                ws.send_binary(data_byte)
+            except Exception as e:
+                print(f'\n## Send failed: {e} ##')
+                return
+
+    _resize()
+    threading.Thread(target=_ws_in).start()
+
+    # 🔧 Delay and newline to trigger prompt
+    time.sleep(1)
+    ws.send_binary(bytearray(map(ord, "\00\n")))
+    if debug:
+        print("[DEBUG] Sent initial newline to trigger prompt")
+
+    listen_keyboard(on_release=_ws_out, delay_second_char=0, delay_other_chars=0, lower=False)
+
+def launch_cli_shell(site_id=None, device_id=None, debug=False):
+    site_id, device_id = select_site_and_device(site_id, device_id)
+    if not site_id or not device_id:
+        return
+    shell_url = create_shell_session(site_id, device_id)
+    if shell_url:
+        run_interactive_shell(shell_url, debug=debug)
+
+
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -1630,7 +1737,8 @@ menu_actions = {
     "29": (generate_support_package, "Generate support package for each site"),
     "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV"),
     "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
-    "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV")
+    "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
+    "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
 }
 
 def main():
@@ -1641,16 +1749,17 @@ def main():
     parser.add_argument("-S", "--site", help="Human-readable site name")
     parser.add_argument("-D", "--device", help="Human-readable device name")
     parser.add_argument("-P", "--port", help="Port ID")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
     args = parser.parse_args()
 
-    global org_id  # <-- Add this line
+    global org_id
 
     # If any CLI args are passed, override interactive mode
     if len(sys.argv) > 1:
         logging.info("CLI arguments detected, running in non-interactive mode.")
         if args.org:
-            org_id = args.org  # <-- This now sets the global variable!
+            org_id = args.org
             logging.info(f"Overriding org_id with CLI argument: {org_id}")
         else:
             org_id = get_org_id()
@@ -1689,14 +1798,29 @@ def main():
         if args.menu in menu_actions:
             func, _ = menu_actions[args.menu]
             logging.info(f"Executing menu action '{args.menu}'.")
-            func()
+
+            # Dynamically pass only accepted arguments
+            import inspect
+            func_args = {
+                "site_id": site_id,
+                "device_id": device_id,
+                "port": args.port,
+                "org_id": org_id,
+                "debug": args.debug
+            }
+            sig = inspect.signature(func)
+            accepted_args = {
+                k: v for k, v in func_args.items()
+                if k in sig.parameters and v is not None
+            }
+            func(**accepted_args)
         else:
             logging.error(f"❌ Invalid menu option: {args.menu}")
             print(f"❌ Invalid menu option: {args.menu}")
             sys.exit(1)
 
         logging.info("CLI execution complete. Exiting.")
-        sys.exit(0)  # Exit after CLI execution
+        sys.exit(0)
 
     # --- Interactive Menu Fallback ---
     if len(sys.argv) == 1:
@@ -1710,11 +1834,12 @@ def main():
             func, _ = selected
             logging.info(f"User selected menu option '{iwant}'. Executing associated function.")
             func()
-            sys.exit(0)  # <-- Add this line
+            sys.exit(0)
         else:
             logging.warning(f"Invalid selection '{iwant}' entered by user.")
             print("Invalid selection. Please try again.")
-            sys.exit(1)  # <-- Add this line
+            sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
