@@ -1,4 +1,4 @@
-import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil
+import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil, pyte
 from prettytable import PrettyTable
 from tqdm import tqdm
 from datetime import datetime, timedelta
@@ -1618,9 +1618,10 @@ def create_shell_session(site_id, device_id):
         return None
 
 def run_interactive_shell(shell_url, debug=False):
-    import json, re, sys, shutil, threading, time
+    import json, sys, shutil, threading, time
     from sshkeyboard import listen_keyboard, stop_listening
     import websocket
+    import pyte
 
     if debug:
         websocket.enableTrace(True)
@@ -1628,6 +1629,9 @@ def run_interactive_shell(shell_url, debug=False):
     print("🔌 Connecting to WebSocket shell...")
     ws = websocket.create_connection(shell_url)
     print("🟢 Connected.")
+
+    screen = pyte.Screen(80, 40)
+    stream = pyte.Stream(screen)
 
     def _resize():
         cols, rows = shutil.get_terminal_size()
@@ -1643,13 +1647,17 @@ def run_interactive_shell(shell_url, debug=False):
                 if isinstance(data, bytes):
                     data = data.decode('utf-8', errors='ignore')
                 if debug:
-                    print(f"[DEBUG] Received: {repr(data)}")
-                sys.stdout.write(data)
-                sys.stdout.flush()
+                    print(f"[DEBUG] Raw recv: {repr(data)}")
+                if data:
+                    stream.feed(data)
+                    for y in sorted(screen.dirty):
+                        sys.stdout.write(f"\x1b[{y+1};1H")  # Move cursor to line y+1
+                        sys.stdout.write(screen.display[y] + "\x1b[K")  # Clear to end of line
+                    sys.stdout.flush()
+                    screen.dirty.clear()
             except Exception as e:
                 print(f'\n## Connection lost: {e} ##')
                 return
-
     def _ws_out(key):
         if ws.connected:
             keymap = {
@@ -1675,21 +1683,28 @@ def run_interactive_shell(shell_url, debug=False):
                 print(f'\n## Send failed: {e} ##')
                 return
 
-    # Send terminal size first
     _resize()
-
-    # Start receiving thread
     threading.Thread(target=_ws_in).start()
 
-    # Wake up SSR prompt
-    time.sleep(0.5)
+    # Wake up Juniper SSR prompt
+    time.sleep(1)
     ws.send_binary(bytearray(map(ord, "\00\n\n")))
     if debug:
-        print("[DEBUG] Sent wakeup sequence")
+        print("[DEBUG] Sent wakeup sequence to Juniper SSRs")
 
     listen_keyboard(on_release=_ws_out, delay_second_char=0, delay_other_chars=0, lower=False)
 
 
+    _resize()
+    threading.Thread(target=_ws_in).start()
+
+    # Wake up Juniper SSR prompt
+    time.sleep(1)
+    ws.send_binary(bytearray(map(ord, "\00\n\n")))
+    if debug:
+        print("[DEBUG] Sent wakeup sequence to Juniper SSRs")
+
+    listen_keyboard(on_release=_ws_out, delay_second_char=0, delay_other_chars=0, lower=False)
 
 def launch_cli_shell(site_id=None, device_id=None, debug=False):
     site_id, device_id = select_site_and_device(site_id, device_id)
