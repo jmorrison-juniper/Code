@@ -1714,6 +1714,157 @@ def launch_cli_shell(site_id=None, device_id=None, debug=False):
     if shell_url:
         run_interactive_shell(shell_url, debug=debug)
 
+def listen_for_command_output(mist_host, mist_apitoken, site_id, device_id, session_id, timeout=30, idle_timeout=3):
+    import websocket
+    import json
+    import threading
+    import time
+    import logging
+    from prettytable import PrettyTable
+
+    ws_url = f"wss://{mist_host}/api-ws/v1/stream"
+    headers = [f"Authorization: Token {mist_apitoken}"]
+    subscribe_msg = {
+        "subscribe": f"/sites/{site_id}/devices/{device_id}/cmd"
+    }
+
+    output_lines = []
+    buffer = ""
+    last_message_time = time.time()
+
+    def on_message(ws, message):
+        nonlocal last_message_time, buffer, output_lines
+        try:
+            last_message_time = time.time()
+            logging.info(f"🔔 Raw WebSocket message:\n{message}")
+
+            msg = json.loads(message)
+            data_str = msg.get("data", "{}")
+            data_obj = json.loads(data_str) if isinstance(data_str, str) else data_str
+            inner_data = data_obj.get("data", {})
+            if isinstance(inner_data, str):
+                inner_data = json.loads(inner_data)
+
+            if inner_data.get("session") == session_id:
+                raw_output = inner_data.get("raw", "")
+                buffer += raw_output
+
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    output_lines.append(line)
+
+        except Exception as e:
+            logging.warning(f"⚠️ Error parsing message: {e}")
+
+    def on_error(ws, error):
+        logging.error(f"❌ WebSocket error: {error}")
+
+    def on_close(ws, *args):
+        logging.info("🔌 WebSocket closed.")
+        if output_lines:
+            compiled_output = "\n".join(output_lines)
+            print("\n📥 ARP Output Received:\n")
+            rows = compiled_output.split("\n")
+            parsed_rows = [row.split("\t") for row in rows if row.strip()]
+            max_cols = max(len(row) for row in parsed_rows)
+            for row in parsed_rows:
+                while len(row) < max_cols:
+                    row.append("")
+            table = PrettyTable()
+            table.field_names = [f"Col {i+1}" for i in range(max_cols)]
+            for row in parsed_rows:
+                table.add_row(row)
+            print(table)
+            logging.info(f"📥 Compiled ARP Output:\n{compiled_output}")
+        else:
+            print("⚠️ No ARP output received for this session.")
+            logging.warning("⚠️ No ARP output received for this session.")
+
+    def on_open(ws):
+        logging.info("🔓 WebSocket opened. Subscribing...")
+        ws.send(json.dumps(subscribe_msg))
+
+    ws = websocket.WebSocketApp(
+        ws_url,
+        header=headers,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_open=on_open
+    )
+
+    def run_ws():
+        ws.run_forever()
+
+    ws_thread = threading.Thread(target=run_ws)
+    ws_thread.start()
+
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        time.sleep(1)
+        if time.time() - last_message_time > idle_timeout and output_lines:
+            logging.info("⏹️ Idle timeout reached. Closing WebSocket.")
+            ws.close()
+            break
+
+    if ws.keep_running:
+        logging.warning("⏱️ Timeout waiting for ARP output.")
+        ws.close()
+
+
+
+def trigger_arp_command(mist_host, mist_apitoken, site_id, device_id):
+    import requests
+
+    url = f"https://{mist_host}/api/v1/sites/{site_id}/devices/{device_id}/arp"
+    headers = {'Authorization': f'Token {mist_apitoken}'}
+    response = requests.post(url, headers=headers, json={})
+
+    if response.status_code == 200:
+        session_id = response.json().get("session")
+        print(f"✅ ARP command triggered. Session ID: {session_id}")
+        return session_id
+    else:
+        print(f"❌ Failed to trigger ARP command: {response.status_code}")
+        print(response.text)
+        return None
+
+def run_arp_via_websocket(site_id=None, device_id=None):
+    if not site_id or not device_id:
+        site_id, device_id = select_site_and_device(site_id, device_id)
+    if not site_id or not device_id:
+        return
+
+    # Retrieve mist_host and mist_apitoken from the apisession or environment
+    mist_host = getattr(apisession, "host", None) or os.getenv("MIST_HOST")
+    mist_apitoken = getattr(apisession, "apitoken", None) or os.getenv("MIST_APITOKEN")
+
+    if not mist_host or not mist_apitoken:
+        print("❌ Mist host or API token not found in session or environment.")
+        return
+
+    print("🔌 Subscribing to WebSocket stream...")
+    session_id = trigger_arp_command(mist_host, mist_apitoken, site_id, device_id)
+    if session_id:
+        listen_for_command_output(mist_host.replace("api.", "api-ws."), mist_apitoken, site_id, device_id, session_id)
+
+
+def _load_env(env_file: str, mist_host: str, mist_apitoken: str, mist_site_id: str, mist_device_id: str = ""):
+    from dotenv import load_dotenv
+    import os
+
+    if env_file.startswith("~/"):
+        env_file = os.path.join(os.path.expanduser("~"), env_file.replace("~/", ""))
+    load_dotenv(dotenv_path=env_file, override=True)
+
+    mist_host = os.getenv("MIST_HOST", mist_host)
+    mist_apitoken = os.getenv("MIST_APITOKEN", mist_apitoken)
+    mist_site_id = os.getenv("MIST_SITE_ID", mist_site_id)
+    mist_device_id = os.getenv("MIST_DEVICE_ID", mist_device_id)
+
+    return mist_host, mist_apitoken, mist_site_id, mist_device_id
+
+
 
 menu_actions = {
     # 🗂️ Setup & Core Logs
@@ -1761,6 +1912,7 @@ menu_actions = {
     "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
     "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
+    "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket")
 }
 
 def main():
