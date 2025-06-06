@@ -14,6 +14,14 @@ Flag Purpose Example -O Set org_id -O "abc123"
 
 Prerequisite imports:
 
-import mistapi, csv, ast, json, time, logging, os, argparse, sys
-
-from prettytable import PrettyTable from tqdm import tqdm from datetime import datetime, timedelta
+required_packages = [
+    "mistapi",
+    "csv",
+    "websocket-client",
+    "pyte",
+    "requests",
+    "prettytable",
+    "tqdm",
+    "sshkeyboard",
+    "numpy",
+    "python-dotenv"

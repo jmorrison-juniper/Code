@@ -1,9 +1,37 @@
+import subprocess
+import sys
+
+required_packages = [
+    "mistapi",
+    "csv",  # built-in, safe to include
+    "websocket-client",
+    "pyte",
+    "requests",
+    "prettytable",
+    "tqdm",
+    "sshkeyboard",
+    "numpy",
+    "python-dotenv"
+]
+
+for package in required_packages:
+    try:
+        if package in {"websocket-client"}:
+            __import__("websocket")
+        elif package == "python-dotenv":
+            __import__("dotenv")
+        else:
+            __import__(package)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
 import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil, pyte, inspect, requests
 from prettytable import PrettyTable
 from tqdm import tqdm
 from datetime import datetime, timedelta, timezone
 from sshkeyboard import listen_keyboard, stop_listening
 from dotenv import load_dotenv
+import numpy as np
 
 logging.basicConfig(
     filename='script.log',
@@ -17,6 +45,9 @@ past_epoch = current_epoch - 24 * 3600 # 24 hours * 3600 seconds/hour
 device_type=str("all")
 csv_file="stuff.csv"
 fields = ["key", "display", "description"]
+
+# Global state for integral control and JSON persistence
+tuning_data_file = "tuning_data.json"
 
 # Initialize API session with environment file
 apisession = mistapi.APISession(env_file=".env",console_log_level=20,logging_log_level=20)
@@ -186,30 +217,21 @@ def process_and_merge_csv_for_sfp_address():
     print(f"✅ Merged data written to {output_file}")
 
 def get_org_id():
-    """
-    Retrieves the organization ID (org_id) for API calls.
-    Priority:
-    1. Use global org_id if already set.
-    2. Try to load from .env file (MIST_ORG_ID).
-    3. Prompt user to select org via mistapi CLI.
-    """
     global org_id
     if org_id:
         logging.info(f"✅ Using org_id from global variable: {org_id}")
         return org_id
-
     # Try to load from .env if not already set
     try:
         with open(".env", "r") as f:
             for line in f:
-                if line.strip().startswith("MIST_ORG_ID="):
+                if line.strip().startswith("org_id="):  # <-- updated line
                     org_id = line.strip().split("=", 1)[1].strip().strip('"')
-                    if org_id:
-                        logging.info(f"✅ Loaded org_id from .env: {org_id}")
-                        return org_id
+        if org_id:
+            logging.info(f"✅ Loaded org_id from .env: {org_id}")
+            return org_id
     except FileNotFoundError:
         logging.warning("⚠️ .env file not found.")
-
     # Prompt if still not set
     logging.info("🔍 No org_id found in .env or CLI. Prompting user...")
     org_id_list = mistapi.cli.select_org(apisession)
@@ -371,44 +393,53 @@ def fetch_process_and_display_data(title, api_call, filename, sort_key=None, dis
     org_id = get_org_id()
     logging.debug(f"Using org_id: {org_id}")
 
-    # Call the API and get all paginated results
-    response = api_call(apisession, org_id, **kwargs)
-    rawdata = mistapi.get_all(response=response, mist_session=apisession)
-    logging.info(f"Fetched {len(rawdata)} raw records from API.")
+    try:
+        # Call the API and get all paginated results
+        response = api_call(apisession, org_id, **kwargs)
+        rawdata = mistapi.get_all(response=response, mist_session=apisession)
 
-    # Filter out non-dict entries (defensive)
-    data = [entry for entry in rawdata if isinstance(entry, dict)]
-    logging.debug(f"Filtered to {len(data)} dict records.")
+        if rawdata is None:
+            logging.warning(f"⚠️ No data returned from API for {title}. Skipping.")
+            return
 
-    # Sort data if a sort key is provided
-    if sort_key:
-        data = sorted(data, key=lambda x: x.get(sort_key, ""))
-        logging.debug(f"Data sorted by key: {sort_key}")
+        logging.info(f"Fetched {len(rawdata)} raw records from API.")
 
-    # Flatten nested fields for CSV compatibility
-    data = flatten_all_nested_fields(data)
-    logging.debug("Flattened all nested fields.")
+        # Filter out non-dict entries (defensive)
+        data = [entry for entry in rawdata if isinstance(entry, dict)]
+        logging.debug(f"Filtered to {len(data)} dict records.")
 
-    # Escape multiline strings for CSV
-    data = escape_multiline_strings(data)
-    logging.debug("Escaped multiline strings.")
+        # Sort data if a sort key is provided
+        if sort_key:
+            data = sorted(data, key=lambda x: x.get(sort_key, ""))
+            logging.debug(f"Data sorted by key: {sort_key}")
 
-    # Determine all unique fields for CSV and table display
-    fields = get_all_unique_keys(data)
-    logging.debug(f"Unique fields for CSV/table: {fields}")
+        # Flatten nested fields for CSV compatibility
+        data = flatten_all_nested_fields(data)
+        logging.debug("Flattened all nested fields.")
 
-    # Write processed data to CSV
-    write_data_to_csv(data, filename)
-    logging.info(f"Data written to {filename} ({len(data)} rows).")
+        # Escape multiline strings for CSV
+        data = escape_multiline_strings(data)
+        logging.debug("Escaped multiline strings.")
 
-    # Prepare and display PrettyTable
-    table = PrettyTable()
-    table.field_names = display_fields if display_fields else fields
-    table.valign = "t"
-    for item in tqdm(data, desc="Processing", unit="record"):
-        row = [item.get(field, "") for field in table.field_names]
-        table.add_row(row)
-    logging.info("\n" + table.get_string())
+        # Determine all unique fields for CSV and table display
+        fields = get_all_unique_keys(data)
+        logging.debug(f"Unique fields for CSV/table: {fields}")
+
+        # Write processed data to CSV
+        write_data_to_csv(data, filename)
+        logging.info(f"Data written to {filename} ({len(data)} rows).")
+
+        # Prepare and display PrettyTable
+        table = PrettyTable()
+        table.field_names = display_fields if display_fields else fields
+        table.valign = "t"
+        for item in tqdm(data, desc="Processing", unit="record"):
+            row = [item.get(field, "") for field in table.field_names]
+            table.add_row(row)
+        logging.info("\n" + table.get_string())
+
+    except Exception as e:
+        logging.error(f"❌ Error during data fetch for {title}: {e}")
 
 def prompt_user_to_select_device_id(site_id, device_type="all", csv_filename="SiteInventory.csv"):
     """
@@ -1872,10 +1903,18 @@ def loop_refresh_core_datasets(delay=None, debug=False):
     """
     Continuously refreshes core datasets with optional dynamic delay based on API usage.
     If delay is None, it will be calculated dynamically to avoid exceeding API limits.
+    Loop can be stopped gracefully by creating a file named 'stop_loop.txt'.
     """
     logging.info("🔁 Starting continuous data refresh loop...")
+    smoothed = None  # Initialize smoothed delay tracker
+    get_org_id()  # Ensure org_id is loaded from .env if not already
+
     try:
         while True:
+            if os.path.exists("stop_loop.txt"):
+                logging.info("🛑 Stop signal detected (stop_loop.txt). Exiting loop.")
+                break
+
             export_org_site_list()
             export_org_device_inventory()
             export_org_device_statistics()
@@ -1884,45 +1923,125 @@ def loop_refresh_core_datasets(delay=None, debug=False):
             logging.info("✅ All datasets refreshed.")
 
             # Determine delay
-            actual_delay = delay if delay is not None else get_dynamic_delay()
+            if delay is not None:
+                actual_delay = delay
+            else:
+                smoothed, actual_delay = get_dynamic_delay(smoothed)
+
             logging.info(f"⏳ Sleeping for {actual_delay:.2f} seconds...")
             time.sleep(actual_delay)
+
     except KeyboardInterrupt:
-        logging.info("🛑 Loop interrupted by user. Exiting gracefully.")
+        logging.info("🛑 Loop interrupted by user (Ctrl+C). Exiting gracefully.")
 
-from prettytable import PrettyTable
-from datetime import datetime, timezone
+def load_tuning_data():
+    if os.path.exists(tuning_data_file):
+        with open(tuning_data_file, 'r') as f:
+            return json.load(f)
+    return {"k_p": 0.1, "k_i": 0.0005, "error": [], "integral": 0.0}
 
-def get_dynamic_delay():
+def save_tuning_data(data):
+    with open(tuning_data_file, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def adjust_gains(data):
+    # Adjust gains based on recent error trend
+    recent_errors = data["error"][-10:]
+    if not recent_errors:
+        return
+    error_trend = sum(recent_errors) / len(recent_errors)
+    if error_trend > 0:
+        data["k_p"] *= 1.05
+        data["k_i"] *= 1.05
+    elif error_trend < 0:
+        data["k_p"] *= 0.95
+        data["k_i"] *= 0.95
+
+def compute_dynamic_alpha(errors, min_alpha=0.1, max_alpha=0.9):
     """
-    Calculates a safe delay between API calls based on current usage and remaining time in the hour.
-    Returns delay in seconds (can be fractional).
+    Computes a dynamic smoothing factor alpha based on the standard deviation of recent errors.
     """
+    if len(errors) < 2:
+        return 0.3  # default fallback
+    std_dev = np.std(errors[-10:])
+    normalized = min(std_dev / 50, 1.0)  # adjust divisor to control sensitivity
+    alpha = min_alpha + (max_alpha - min_alpha) * normalized
+    return round(alpha, 3)
+
+def get_dynamic_delay(smoothed_delay=None):
+    """
+    Calculates a delay between API calls using PI feedback control with adaptive gain.
+    Applies exponential smoothing with dynamic alpha based on error volatility.
+    Returns (smoothed_delay, delay_in_seconds)
+    """
+    tuning_data = load_tuning_data()
+    k_p = tuning_data["k_p"]
+    k_i = tuning_data["k_i"]
+    delay_integral = tuning_data.get("integral", 0.0)
+    error_history = tuning_data.get("error", [])
+
     try:
         usage = mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data
-
-        # Format usage data into a PrettyTable
-        table = PrettyTable()
-        table.field_names = ["Metric", "Value"]
-        for key, value in usage.items():
-            table.add_row([key, value])
-        logging.info("\n" + table.get_string())
-
         limit = usage.get("request_limit", 5000)
         used = usage.get("requests", 0)
-        remaining = max(limit - used, 1)
 
         now = datetime.now(timezone.utc)
-        seconds_remaining = 3600 - (now.minute * 60 + now.second + now.microsecond / 1_000_000)
+        seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
+        seconds_remaining = 3600 - seconds_elapsed
+        ideal_used = (seconds_elapsed / 3600) * limit
+        error = used - ideal_used
+        delay_integral += error
 
-        delay = max(seconds_remaining / remaining, 0.001)
-        delay_ms = int(delay * 1000)
-        logging.info(f"API usage: {used}/{limit}. Calculated delay: {delay:.3f} seconds ({delay_ms} ms).")
-        return delay
+        # Cap and decay the integral
+        delay_integral = max(min(delay_integral, 10000), -10000)
+        delay_integral *= 0.99
+
+        # Adjust gains based on time progress
+        progress = seconds_elapsed / 3600
+        k_p *= (1 - progress)
+
+        # Calculate base and raw delay
+        base_delay = seconds_remaining / max(limit - used, 1)
+        raw_delay = max(base_delay + k_p * error + k_i * delay_integral, 0.5)
+
+        # Compute dynamic alpha
+        error_history.append(error)
+        alpha = compute_dynamic_alpha(error_history)
+
+        # Apply exponential smoothing
+        if smoothed_delay is None:
+            smoothed_delay = raw_delay
+        else:
+            smoothed_delay = alpha * raw_delay + (1 - alpha) * smoothed_delay
+
+        # Log metrics
+        table = PrettyTable()
+        table.field_names = ["Metric", "Value"]
+        table.add_row(["Used", used])
+        table.add_row(["Limit", limit])
+        table.add_row(["Elapsed (s)", f"{seconds_elapsed:.2f}"])
+        table.add_row(["Ideal Used", f"{ideal_used:.2f}"])
+        table.add_row(["Error", f"{error:.2f}"])
+        table.add_row(["Integral", f"{delay_integral:.2f}"])
+        table.add_row(["k_p", f"{k_p:.4f}"])
+        table.add_row(["k_i", f"{k_i:.4f}"])
+        table.add_row(["Base Delay", f"{base_delay:.2f} s"])
+        table.add_row(["Raw Delay", f"{raw_delay:.2f} s"])
+        table.add_row(["Smoothed Delay", f"{smoothed_delay:.2f} s"])
+        table.add_row(["Dynamic Alpha", f"{alpha:.2f}"])
+        logging.info("\n" + table.get_string())
+
+        # Save tuning data
+        if int(seconds_elapsed) % 60 == 0:
+            tuning_data["error"] = error_history[-20:]  # keep last 20 for memory
+            tuning_data["integral"] = delay_integral
+            adjust_gains(tuning_data)
+            save_tuning_data(tuning_data)
+
+        return smoothed_delay, smoothed_delay
     except Exception as e:
         logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 5s delay.")
-        return 5.0
-
+        return smoothed_delay, 5.0
 
 menu_actions = {
     # 🗂️ Setup & Core Logs
@@ -1971,7 +2090,7 @@ menu_actions = {
     "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
     "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket"),
-    "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN)")
+    "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN) Stop with CTRL+C or create 'stop_loop.txt'"),
 }
 
 def main():
@@ -2072,7 +2191,6 @@ def main():
             logging.warning(f"Invalid selection '{iwant}' entered by user.")
             print("Invalid selection. Please try again.")
             sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
