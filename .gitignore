@@ -245,3 +245,5 @@ $RECYCLE.BIN/
 *.lnk
 pyte 1.txt
 correct arp output format.txt
+script needs.txt
+arp_output_raw.txt

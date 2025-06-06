@@ -1,8 +1,9 @@
-import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil, pyte
+import mistapi, csv, ast, json, time, logging, os, argparse, sys, websocket, threading, re, sys, shutil, pyte, inspect, requests
 from prettytable import PrettyTable
 from tqdm import tqdm
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sshkeyboard import listen_keyboard, stop_listening
+from dotenv import load_dotenv
 
 logging.basicConfig(
     filename='script.log',
@@ -23,16 +24,11 @@ apisession.login()
 
 org_id=None
 
-print(mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data)
-
 def check_and_generate_csv(file_name, generate_function, freshness_minutes=15):
     """
     Checks if a CSV file exists and is fresh (modified within the last `freshness_minutes`).
     If not, it runs the `generate_function` to regenerate the file.
     """
-    from datetime import datetime, timedelta
-    import os
-
     # Check if the file already exists
     if os.path.exists(file_name):
         # Get the last modified time of the file
@@ -351,15 +347,19 @@ def write_data_to_csv(data, csv_file):
     data = escape_multiline_strings(data)
     fields = get_all_unique_keys(data)
     logging.debug(f"CSV fields determined: {fields}")
-    with open(csv_file, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        for idx, row in enumerate(data):
-            # Write each row, ensuring all fields are present
-            writer.writerow({field: row.get(field, "") for field in fields})
-            if idx < 3:  # Log the first few rows for debugging
-                logging.debug(f"Row {idx} written: {row}")
-    logging.info(f"Data saved to {csv_file} ({len(data)} rows)")
+
+    try:
+        with open(csv_file, 'w', newline='', encoding='utf-8') as file:
+            writer = csv.DictWriter(file, fieldnames=fields)
+            writer.writeheader()
+            for idx, row in enumerate(data):
+                writer.writerow({field: row.get(field, "") for field in fields})
+                if idx < 3:  # Log the first few rows for debugging
+                    logging.debug(f"Row {idx} written: {row}")
+        logging.info(f"Data saved to {csv_file} ({len(data)} rows)")
+    except PermissionError as e:
+        logging.error(f"❌ Permission denied when writing to {csv_file}: {e}")
+        print(f"❌ Cannot write to {csv_file}. Is it open in another program?")
 
 def fetch_process_and_display_data(title, api_call, filename, sort_key=None, display_fields=None, **kwargs):
     """
@@ -661,10 +661,6 @@ def export_org_device_statistics():
         api_call=mistapi.api.v1.orgs.stats.listOrgDevicesStats,
         filename="OrgDeviceStats.csv",
         sort_key="type",
-        display_fields=[
-            "name", "model", "mac", "status", "type", "hw_rev", "ip", "serial",
-            "version", "height", "last_seen", "locating", "notes", "orientation", "uptime"
-        ],
         type="all",
         limit=1000
     )
@@ -680,11 +676,6 @@ def export_org_device_port_stats():
         api_call=mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts,
         filename="OrgDevicePortStats.csv",
         sort_key="mac",
-        display_fields=[
-            "mac", "device_type", "device_interface_type", "speed",
-            "rx_bytes", "tx_bytes", "port_desc", "port_id", "port_mac",
-            "port_mode", "port_parent", "port_usage", "power_allocated", "power_draw"
-        ],
         limit=1000
     )
 
@@ -699,11 +690,6 @@ def export_org_vpn_peer_stats():
         api_call=mistapi.api.v1.orgs.stats.searchOrgPeerPathStats,
         filename="OrgVPNPeerStats.csv",
         sort_key="mac",
-        display_fields=[
-            "hop_count", "is_active", "jitter", "latency", "loss", "mos",
-            "network_interface", "peer_port_id", "peer_router_name", "port_id",
-            "router_name", "up", "uptime", "vpn_name", "wan_name"
-        ],
         limit=1000
     )
 
@@ -770,8 +756,7 @@ def export_all_org_devices():
         title="Org Devices:",
         api_call=mistapi.api.v1.orgs.devices.listOrgDevices,
         filename="OrgDevices.csv",
-        sort_key="type",
-        display_fields=["name", "mac"]
+        sort_key="type"
     )
     logging.info("Completed export_all_org_devices and wrote results to OrgDevices.csv.")  # Log completion
 
@@ -1122,10 +1107,9 @@ def export_all_gateway_test_results_by_site():
 
 def export_sites_with_location_info():
     """
-    Export a list of sites with location and timezone information to SitesWithLocations.csv.
-    Logs each step for traceability.
+    Export a list of sites with all available fields to SitesWithLocations.csv.
     """
-    logging.info("Listing Sites with Locations:")
+    logging.info("Listing Sites with Full Info:")
     org_id = get_org_id()
     logging.debug(f"Using org_id: {org_id} for site location export.")
 
@@ -1134,37 +1118,13 @@ def export_sites_with_location_info():
     sites = mistapi.get_all(response=response, mist_session=apisession)
     logging.info(f"Fetched {len(sites)} sites from the organization.")
 
-    site_data = []
-    for site in sites:
-        # Extract relevant site information, handling missing fields gracefully
-        site_info = {
-            "name": site.get("name", ""),
-            "address": site.get("address", ""),
-            "latitude": site.get("latlng", {}).get("lat", ""),
-            "longitude": site.get("latlng", {}).get("lng", ""),
-            "timezone": site.get("timezone", "")
-        }
-        site_data.append(site_info)
-        logging.debug(f"Processed site: {site_info['name']} (Lat: {site_info['latitude']}, Lng: {site_info['longitude']})")
+    # Flatten and sanitize all site data
+    flattened_sites = flatten_all_nested_fields(sites)
+    sanitized_sites = escape_multiline_strings(flattened_sites)
 
-    # Escape multiline strings for CSV compatibility
-    site_data = escape_multiline_strings(site_data)
-    # Write the site data to a CSV file
-    write_data_to_csv(site_data, "SitesWithLocations.csv")
-    logging.info("Site location data written to SitesWithLocations.csv")
-
-    # Prepare and display a PrettyTable for visual inspection
-    table = PrettyTable()
-    table.field_names = ["Name", "Address", "Latitude", "Longitude", "Timezone"]
-    for site in site_data:
-        table.add_row([
-            site["name"],
-            site["address"],
-            site["latitude"],
-            site["longitude"],
-            site["timezone"]
-        ])
-    logging.info("\n" + table.get_string())  # Log the table output for reference
+    # Write to CSV
+    write_data_to_csv(sanitized_sites, "SitesWithLocations.csv")
+    logging.info("✅ Full site data written to SitesWithLocations.csv")
 
 def export_gateways_with_site_info():
     """
@@ -1618,11 +1578,6 @@ def create_shell_session(site_id, device_id):
         return None
 
 def run_interactive_shell(shell_url, debug=False):
-    import json, sys, shutil, threading, time
-    from sshkeyboard import listen_keyboard, stop_listening
-    import websocket
-    import pyte
-
     if debug:
         websocket.enableTrace(True)
 
@@ -1714,13 +1669,9 @@ def launch_cli_shell(site_id=None, device_id=None, debug=False):
     if shell_url:
         run_interactive_shell(shell_url, debug=debug)
 
-def listen_for_command_output(mist_host, mist_apitoken, site_id, device_id, session_id, timeout=30, idle_timeout=3):
-    import websocket
-    import json
-    import threading
-    import time
-    import logging
-    from prettytable import PrettyTable
+def listen_for_command_output(mist_host, mist_apitoken, site_id, device_id, session_id, timeout=30, idle_timeout=3, debug=False):
+    if debug:
+        websocket.enableTrace(True)
 
     ws_url = f"wss://{mist_host}/api-ws/v1/stream"
     headers = [f"Authorization: Token {mist_apitoken}"]
@@ -1734,51 +1685,13 @@ def listen_for_command_output(mist_host, mist_apitoken, site_id, device_id, sess
 
     def on_message(ws, message):
         nonlocal last_message_time, buffer, output_lines
-        try:
-            last_message_time = time.time()
-            logging.info(f"🔔 Raw WebSocket message:\n{message}")
+        last_message_time, buffer = _handle_ws_message(message, session_id, buffer, output_lines, debug)
 
-            msg = json.loads(message)
-            data_str = msg.get("data", "{}")
-            data_obj = json.loads(data_str) if isinstance(data_str, str) else data_str
-            inner_data = data_obj.get("data", {})
-            if isinstance(inner_data, str):
-                inner_data = json.loads(inner_data)
-
-            if inner_data.get("session") == session_id:
-                raw_output = inner_data.get("raw", "")
-                buffer += raw_output
-
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    output_lines.append(line)
-
-        except Exception as e:
-            logging.warning(f"⚠️ Error parsing message: {e}")
+    def on_close(ws, *args):
+        _handle_ws_close(output_lines, debug)
 
     def on_error(ws, error):
         logging.error(f"❌ WebSocket error: {error}")
-
-    def on_close(ws, *args):
-        logging.info("🔌 WebSocket closed.")
-        if output_lines:
-            compiled_output = "\n".join(output_lines)
-            print("\n📥 ARP Output Received:\n")
-            rows = compiled_output.split("\n")
-            parsed_rows = [row.split("\t") for row in rows if row.strip()]
-            max_cols = max(len(row) for row in parsed_rows)
-            for row in parsed_rows:
-                while len(row) < max_cols:
-                    row.append("")
-            table = PrettyTable()
-            table.field_names = [f"Col {i+1}" for i in range(max_cols)]
-            for row in parsed_rows:
-                table.add_row(row)
-            print(table)
-            logging.info(f"📥 Compiled ARP Output:\n{compiled_output}")
-        else:
-            print("⚠️ No ARP output received for this session.")
-            logging.warning("⚠️ No ARP output received for this session.")
 
     def on_open(ws):
         logging.info("🔓 WebSocket opened. Subscribing...")
@@ -1811,11 +1724,106 @@ def listen_for_command_output(mist_host, mist_apitoken, site_id, device_id, sess
         logging.warning("⏱️ Timeout waiting for ARP output.")
         ws.close()
 
+def _handle_ws_message(message, session_id, buffer, output_lines, debug=False):
+    last_message_time = time.time()
+    try:
+        if debug:
+            logging.info(f"🔔 Raw WebSocket message:\n{message}")
 
+        msg = json.loads(message)
+        data_str = msg.get("data", "{}")
+        data_obj = json.loads(data_str) if isinstance(data_str, str) else data_str
+        inner_data = data_obj.get("data", {})
+        if isinstance(inner_data, str):
+            inner_data = json.loads(inner_data)
+
+        if inner_data.get("session") == session_id:
+            raw_output = inner_data.get("raw", "")
+            buffer += raw_output
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                output_lines.append(line)
+
+    except Exception as e:
+        if debug:
+            logging.exception("⚠️ Error parsing WebSocket message:")
+        else:
+            logging.warning(f"⚠️ Error parsing message: {e}")
+
+    return last_message_time, buffer
+
+def _handle_ws_close(output_lines, debug=False):
+    logging.info("🔌 WebSocket closed.")
+    if output_lines:
+        compiled_output = "\n".join(output_lines)
+        _save_output_to_file(compiled_output)
+        export_arp_output_to_csv("arp_output_raw.txt")
+
+
+        print("\n📥 ARP Output Received:\n")
+        rows = compiled_output.split("\n")
+        parsed_rows = [row.split("\t") for row in rows if row.strip()]
+        max_cols = max(len(row) for row in parsed_rows)
+        for row in parsed_rows:
+            while len(row) < max_cols:
+                row.append("")
+        table = PrettyTable()
+        table.field_names = [f"Col {i+1}" for i in range(max_cols)]
+        for row in parsed_rows:
+            table.add_row(row)
+
+        if debug:
+            print(table)
+            logging.info(f"📥 Compiled ARP Output:\n{compiled_output}")
+            logging.info("\n" + table.get_string())
+        else:
+            print(f"✅ ARP output received with {len(parsed_rows)} rows.")
+    else:
+        print("⚠️ No ARP output received for this session.")
+        logging.warning("⚠️ No ARP output received for this session.")
+
+def export_arp_output_to_csv(txt_filename="arp_output_raw.txt", csv1="arp_dataset1.csv", csv2="arp_dataset2.csv"):
+    try:
+        with open(txt_filename, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+
+        lines = raw_text.splitlines()
+        dataset1 = []
+        dataset2 = []
+        current_dataset = dataset1
+
+        for line in lines:
+            if "Total" in line:
+                current_dataset = dataset2
+            else:
+                # Split on tabs and clean each field
+                columns = [col.strip() for col in line.split("\t") if col.strip()]
+                if columns:
+                    current_dataset.append(columns)
+
+        with open(csv1, 'w', newline='', encoding='utf-8') as f1:
+            writer = csv.writer(f1)
+            writer.writerows(dataset1)
+
+        with open(csv2, 'w', newline='', encoding='utf-8') as f2:
+            writer = csv.writer(f2)
+            writer.writerows(dataset2)
+
+        print(f"✅ Saved {len(dataset1)} rows to {csv1}")
+        print(f"✅ Saved {len(dataset2)} rows to {csv2}")
+
+    except Exception as e:
+        print(f"❌ Failed to export ARP output to CSV: {e}")
+
+def _save_output_to_file(compiled_output, filename="arp_output_raw.txt"):
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(compiled_output)
+        logging.info(f"📄 ARP output saved to {filename}")
+    except Exception as e:
+        logging.error(f"❌ Failed to save ARP output to file: {e}")
 
 def trigger_arp_command(mist_host, mist_apitoken, site_id, device_id):
-    import requests
-
     url = f"https://{mist_host}/api/v1/sites/{site_id}/devices/{device_id}/arp"
     headers = {'Authorization': f'Token {mist_apitoken}'}
     response = requests.post(url, headers=headers, json={})
@@ -1848,11 +1856,7 @@ def run_arp_via_websocket(site_id=None, device_id=None):
     if session_id:
         listen_for_command_output(mist_host.replace("api.", "api-ws."), mist_apitoken, site_id, device_id, session_id)
 
-
 def _load_env(env_file: str, mist_host: str, mist_apitoken: str, mist_site_id: str, mist_device_id: str = ""):
-    from dotenv import load_dotenv
-    import os
-
     if env_file.startswith("~/"):
         env_file = os.path.join(os.path.expanduser("~"), env_file.replace("~/", ""))
     load_dotenv(dotenv_path=env_file, override=True)
@@ -1864,6 +1868,60 @@ def _load_env(env_file: str, mist_host: str, mist_apitoken: str, mist_site_id: s
 
     return mist_host, mist_apitoken, mist_site_id, mist_device_id
 
+def loop_refresh_core_datasets(delay=None, debug=False):
+    """
+    Continuously refreshes core datasets with optional dynamic delay based on API usage.
+    If delay is None, it will be calculated dynamically to avoid exceeding API limits.
+    """
+    logging.info("🔁 Starting continuous data refresh loop...")
+    try:
+        while True:
+            export_org_site_list()
+            export_org_device_inventory()
+            export_org_device_statistics()
+            export_org_device_port_stats()
+            export_org_vpn_peer_stats()
+            logging.info("✅ All datasets refreshed.")
+
+            # Determine delay
+            actual_delay = delay if delay is not None else get_dynamic_delay()
+            logging.info(f"⏳ Sleeping for {actual_delay:.2f} seconds...")
+            time.sleep(actual_delay)
+    except KeyboardInterrupt:
+        logging.info("🛑 Loop interrupted by user. Exiting gracefully.")
+
+from prettytable import PrettyTable
+from datetime import datetime, timezone
+
+def get_dynamic_delay():
+    """
+    Calculates a safe delay between API calls based on current usage and remaining time in the hour.
+    Returns delay in seconds (can be fractional).
+    """
+    try:
+        usage = mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data
+
+        # Format usage data into a PrettyTable
+        table = PrettyTable()
+        table.field_names = ["Metric", "Value"]
+        for key, value in usage.items():
+            table.add_row([key, value])
+        logging.info("\n" + table.get_string())
+
+        limit = usage.get("request_limit", 5000)
+        used = usage.get("requests", 0)
+        remaining = max(limit - used, 1)
+
+        now = datetime.now(timezone.utc)
+        seconds_remaining = 3600 - (now.minute * 60 + now.second + now.microsecond / 1_000_000)
+
+        delay = max(seconds_remaining / remaining, 0.001)
+        delay_ms = int(delay * 1000)
+        logging.info(f"API usage: {used}/{limit}. Calculated delay: {delay:.3f} seconds ({delay_ms} ms).")
+        return delay
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 5s delay.")
+        return 5.0
 
 
 menu_actions = {
@@ -1912,7 +1970,8 @@ menu_actions = {
     "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
     "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
-    "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket")
+    "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket"),
+    "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN)")
 }
 
 def main():
@@ -1924,6 +1983,7 @@ def main():
     parser.add_argument("-D", "--device", help="Human-readable device name")
     parser.add_argument("-P", "--port", help="Port ID")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
+    parser.add_argument("--delay", type=int, help="Fixed delay between loop iterations (in seconds). If omitted, delay is dynamic.")
 
     args = parser.parse_args()
 
@@ -1974,7 +2034,6 @@ def main():
             logging.info(f"Executing menu action '{args.menu}'.")
 
             # Dynamically pass only accepted arguments
-            import inspect
             func_args = {
                 "site_id": site_id,
                 "device_id": device_id,
