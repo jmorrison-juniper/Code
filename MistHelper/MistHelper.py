@@ -32,11 +32,19 @@ from datetime import datetime, timedelta, timezone
 from sshkeyboard import listen_keyboard, stop_listening
 from dotenv import load_dotenv
 import numpy as np
+from logging.handlers import RotatingFileHandler
+
+log_handler = RotatingFileHandler(
+    filename='script.log',
+    maxBytes=1_000_000_000,  # ~1 GB
+    backupCount=2,           # Keep only the most recent log file
+    encoding='utf-8'
+)
 
 logging.basicConfig(
-    filename='script.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[log_handler]
 )
 
 current_epoch = int(time.time()) # Get the current epoch timestamp
@@ -392,10 +400,13 @@ def fetch_process_and_display_data(title, api_call, filename, sort_key=None, dis
     print(title)
     org_id = get_org_id()
     logging.debug(f"Using org_id: {org_id}")
+    smoothed = []
 
     try:
         # Call the API and get all paginated results
         response = api_call(apisession, org_id, **kwargs)
+        smoothed, delay = get_dynamic_delay(smoothed)
+        time.sleep(delay)
         rawdata = mistapi.get_all(response=response, mist_session=apisession)
 
         if rawdata is None:
@@ -857,9 +868,11 @@ def export_all_gateway_device_configs():
     logging.info("Starting export of all gateway device configurations...")  # Log start
     org_id = get_org_id()
     logging.debug(f"Using org_id: {org_id} for gateway device configs export.")
+    
 
     # Fetch all gateway device configs using the helper function
     data = fetch_all_gateway_device_configs(apisession, org_id)
+    
     if data:
         logging.info(f"Fetched configs for {len(data)} gateway devices. Flattening and sanitizing data...")
         # Flatten nested fields for CSV compatibility
@@ -874,52 +887,53 @@ def export_all_gateway_device_configs():
 
 def fetch_all_gateway_device_configs(apisession, org_id):
     """
-    Fetches configuration details for all gateway devices across all sites in the organization.
-
-    Args:
-        apisession: The Mist API session object.
-        org_id: The organization ID.
-
-    Returns:
-        List of dictionaries, each containing the configuration for a gateway device.
+    Fetches configuration details for all gateway devices across sites that have at least one gateway.
+    Uses org inventory to reduce unnecessary API calls.
     """
-    logging.info("Fetching all sites in the org for gateway device configs...")
+    logging.info("Fetching sites with gateways using org inventory...")
+    site_ids = get_sites_with_gateways(apisession, org_id)
+    logging.info(f"Found {len(site_ids)} sites with gateways.")
 
-    # Use mistapi.get_all to paginate through all sites
-    response = mistapi.api.v1.orgs.sites.listOrgSites(apisession, org_id, limit=1000)
-    sites = mistapi.get_all(response=response, mist_session=apisession)
-    logging.info(f"Found {len(sites)} sites in the organization.")
-
+    smoothed = None
     all_device_configs = []
 
-    for site in tqdm(sites, desc="Sites", unit="site"):
-        site_id = site.get("id")
-        site_name = site.get("name", "Unnamed Site")
-        logging.debug(f"Processing site: {site_name} (ID: {site_id})")
-
+    for site_id in tqdm(site_ids, desc="Sites", unit="site"):
         try:
-            # Use mistapi.get_all to paginate through all gateway devices in the site
+            site_name = "Unknown"
+            # Optional: fetch site name from SiteList.csv if available
+            try:
+                with open("SiteList.csv", mode="r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row.get("id") == site_id:
+                            site_name = row.get("name", "Unnamed Site")
+                            break
+            except Exception:
+                pass
+
             response = mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id, type="gateway", limit=1000)
             devices = mistapi.get_all(response=response, mist_session=apisession)
-            logging.info(f"  Found {len(devices)} gateway devices at site: {site_name} (ID: {site_id})")
+            logging.info(f"Found {len(devices)} gateway devices at site: {site_name} (ID: {site_id})")
 
             for device in tqdm(devices, desc=f"{site_name}", unit="device", leave=False):
+                smoothed, delay = get_dynamic_delay(smoothed)
+                logging.info(f"[INFO] Sleeping for {delay}.")
+                time.sleep(delay)
+
                 device_id = device.get("id")
                 device_name = device.get("name", "Unnamed Device")
-                logging.debug(f"    Fetching config for device: {device_name} (ID: {device_id})")
                 try:
-                    # Fetch the device configuration using the Mist API
                     config = mistapi.api.v1.sites.devices.getSiteDevice(apisession, site_id, device_id).data
                     config["site_id"] = site_id
                     config["site_name"] = site_name
                     all_device_configs.append(config)
-                    logging.info(f"    ✅ Fetched config for device: {device_name} (ID: {device_id}) at site: {site_name}")
+                    logging.info(f"✅ Fetched config for device: {device_name} (ID: {device_id}) at site: {site_name}")
                 except Exception as e:
-                    logging.warning(f"    ⚠️ Failed to fetch config for device {device_id} at {site_name}: {e}")
+                    logging.warning(f"⚠️ Failed to fetch config for device {device_id} at {site_name}: {e}")
         except Exception as e:
-            logging.warning(f"  ⚠️ Failed to list devices for site {site_name}: {e}")
+            logging.warning(f"⚠️ Failed to list devices for site {site_id}: {e}")
 
-    logging.info(f"Fetched configs for {len(all_device_configs)} gateway devices across all sites.")
+    logging.info(f"Fetched configs for {len(all_device_configs)} gateway devices across filtered sites.")
     return all_device_configs
 
 def export_nac_event_definitions():
@@ -1026,6 +1040,7 @@ def export_all_gateway_synthetic_tests():
     org_id = get_org_id()
     site_ids = get_sites_with_gateways(apisession, org_id)
     all_stats = []
+    smoothed = None
 
     if not site_ids:
         logging.warning("[WARN] No sites with gateways found. Exiting export_all_gateway_synthetic_tests.")
@@ -1033,7 +1048,6 @@ def export_all_gateway_synthetic_tests():
 
     for site_id in tqdm(site_ids, desc="Sites", unit="site"):
         try:
-            # Fetch all gateway devices for the current site
             response = mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id, type="gateway")
             devices = mistapi.get_all(response=response, mist_session=apisession)
             logging.info(f"[INFO] Found {len(devices)} gateway devices at site {site_id}.")
@@ -1041,7 +1055,6 @@ def export_all_gateway_synthetic_tests():
                 device_id = device.get("id")
                 device_name = device.get("name", "")
                 try:
-                    # Fetch synthetic test stats for the gateway device
                     stats = mistapi.api.v1.sites.devices.getSiteDeviceSyntheticTest(apisession, site_id, device_id).data
                     stats["site_id"] = site_id
                     stats["site_name"] = device.get("site_name", "")
@@ -1051,16 +1064,16 @@ def export_all_gateway_synthetic_tests():
                     logging.info(f"[INFO] Collected synthetic test stats for device {device_name} ({device_id}) at site {site_id}.")
                 except Exception as e:
                     logging.warning(f"⚠️ Failed to fetch test stats for device {device_id} at site {site_id}: {e}")
+                smoothed, delay = get_dynamic_delay(smoothed)
+                logging.info(f"[INFO] Sleeping for {delay}.")
+                time.sleep(delay)
         except Exception as e:
             logging.warning(f"⚠️ Failed to list devices for site {site_id}: {e}")
 
     if all_stats:
         filename = "AllGatewaySyntheticTests.csv"
-        # Flatten nested fields for CSV compatibility
         flattened = flatten_all_nested_fields(all_stats)
-        # Escape multiline strings for CSV compatibility
         sanitized = escape_multiline_strings(flattened)
-        # Write the processed data to a CSV file
         write_data_to_csv(sanitized, filename)
         logging.info(f"✅ Synthetic test results saved to {filename} ({len(all_stats)} records).")
     else:
@@ -1098,6 +1111,7 @@ def export_all_gateway_test_results_by_site():
     org_id = get_org_id()
     site_ids = get_sites_with_gateways(apisession, org_id)
     all_results = []
+    smoothed = None  # Initialize smoothed variable for dynamic delay
 
     if not site_ids:
         logging.warning("⚠️ No sites with gateways found.")
@@ -1120,10 +1134,11 @@ def export_all_gateway_test_results_by_site():
             for result in results:
                 result["site_id"] = site_id  # Annotate result with site_id
                 all_results.append(result)
-
+            smoothed, delay = get_dynamic_delay(smoothed)
+            time.sleep(delay)
         except Exception as e:
             logging.warning(f"⚠️ Failed to fetch test results for site {site_id}: {e}")
-
+    
     if all_results:
         filename = "AllGatewayTestResults.csv"
         # Flatten nested fields for CSV compatibility
@@ -1936,8 +1951,11 @@ def loop_refresh_core_datasets(delay=None, debug=False):
 
 def load_tuning_data():
     if os.path.exists(tuning_data_file):
-        with open(tuning_data_file, 'r') as f:
-            return json.load(f)
+        try:
+            with open(tuning_data_file, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            logging.warning(f"⚠️ Failed to parse tuning_data.json: {e}. Using defaults.")
     return {"k_p": 0.1, "k_i": 0.0005, "error": [], "integral": 0.0}
 
 def save_tuning_data(data):
@@ -1988,33 +2006,33 @@ def get_dynamic_delay(smoothed_delay=None):
         now = datetime.now(timezone.utc)
         seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
         seconds_remaining = 3600 - seconds_elapsed
+
         ideal_used = (seconds_elapsed / 3600) * limit
         error = used - ideal_used
         delay_integral += error
-
-        # Cap and decay the integral
         delay_integral = max(min(delay_integral, 10000), -10000)
         delay_integral *= 0.99
 
-        # Adjust gains based on time progress
         progress = seconds_elapsed / 3600
         k_p *= (1 - progress)
 
-        # Calculate base and raw delay
         base_delay = seconds_remaining / max(limit - used, 1)
-        raw_delay = max(base_delay + k_p * error + k_i * delay_integral, 0.5)
+        raw_delay = base_delay + k_p * error + k_i * delay_integral
 
-        # Compute dynamic alpha
         error_history.append(error)
         alpha = compute_dynamic_alpha(error_history)
 
-        # Apply exponential smoothing
         if smoothed_delay is None:
             smoothed_delay = raw_delay
         else:
             smoothed_delay = alpha * raw_delay + (1 - alpha) * smoothed_delay
 
-        # Log metrics
+        # Clamp to non-negative delay
+        if smoothed_delay < 0:
+            logging.warning("⚠️ Smoothed delay was negative. Clamped to 0.")
+        delay_in_seconds = max(smoothed_delay, 0)
+
+        # Log metrics in milliseconds
         table = PrettyTable()
         table.field_names = ["Metric", "Value"]
         table.add_row(["Used", used])
@@ -2023,25 +2041,24 @@ def get_dynamic_delay(smoothed_delay=None):
         table.add_row(["Ideal Used", f"{ideal_used:.2f}"])
         table.add_row(["Error", f"{error:.2f}"])
         table.add_row(["Integral", f"{delay_integral:.2f}"])
-        table.add_row(["k_p", f"{k_p:.4f}"])
-        table.add_row(["k_i", f"{k_i:.4f}"])
-        table.add_row(["Base Delay", f"{base_delay:.2f} s"])
-        table.add_row(["Raw Delay", f"{raw_delay:.2f} s"])
-        table.add_row(["Smoothed Delay", f"{smoothed_delay:.2f} s"])
+        table.add_row(["k_p", f"{k_p:.10f}"])
+        table.add_row(["k_i", f"{k_i:.10f}"])
+        table.add_row(["Base Delay (ms)", f"{base_delay * 1000:.2f} ms"])
+        table.add_row(["Raw Delay (ms)", f"{raw_delay * 1000:.2f} ms"])
+        table.add_row(["Smoothed Delay (ms)", f"{smoothed_delay * 1000:.2f} ms"])
         table.add_row(["Dynamic Alpha", f"{alpha:.2f}"])
         logging.info("\n" + table.get_string())
 
-        # Save tuning data
-        if int(seconds_elapsed) % 60 == 0:
-            tuning_data["error"] = error_history[-20:]  # keep last 20 for memory
-            tuning_data["integral"] = delay_integral
-            adjust_gains(tuning_data)
-            save_tuning_data(tuning_data)
+        tuning_data["error"] = error_history[-20:]
+        tuning_data["integral"] = delay_integral
+        adjust_gains(tuning_data)
+        save_tuning_data(tuning_data)
 
-        return smoothed_delay, smoothed_delay
+        return smoothed_delay, delay_in_seconds
+
     except Exception as e:
-        logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 5s delay.")
-        return smoothed_delay, 5.0
+        logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
+        return smoothed_delay, 0.5
 
 menu_actions = {
     # 🗂️ Setup & Core Logs
