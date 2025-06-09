@@ -2060,6 +2060,247 @@ def get_dynamic_delay(smoothed_delay=None):
         logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
         return smoothed_delay, 0.5
 
+
+    """
+    Launches a shell session, runs 'show route 0.0.0.0 | display json | no-more',
+    and saves the output to ws.log.
+    """
+    logging.info("Launching shell to run 'show route 0.0.0.0'...")
+    site_id, device_id = select_site_and_device()
+    if not site_id or not device_id:
+        return
+
+    shell_url = create_shell_session(site_id, device_id)
+    if not shell_url:
+        logging.error("❌ Could not create shell session.")
+        return
+
+    try:
+        ws = websocket.create_connection(shell_url)
+        print("🟢 Connected to shell session.")
+        time.sleep(1)
+        command = "show route 0.0.0.0 | display json | no-more\n"
+        ws.send_binary(bytearray(map(ord, f"\00{command}")))
+
+        output_lines = []
+        while True:
+            data = ws.recv()
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="ignore")
+            output_lines.append(data)
+            print(data, end="")
+            if "DONE!" in data or "mist@" in data:
+                break
+        ws.close()
+
+        with open("ws.log", "w", encoding="utf-8") as f:
+            f.write("".join(output_lines))
+        print("✅ WebSocket output saved to ws.log")
+
+    except Exception as e:
+        print(f"❌ Error during shell session: {e}")
+
+def show_route_default():
+    """
+    Launches a shell session, runs 'show route 0.0.0.0 | display json | no-more',
+    and saves the output to ws.log.
+    """
+    logging.info("Launching shell to run 'show route 0.0.0.0'...")
+    site_id, device_id = select_site_and_device()
+    if not site_id or not device_id:
+        return
+
+    shell_url = create_shell_session(site_id, device_id)
+    if not shell_url:
+        logging.error("❌ Could not create shell session.")
+        return
+
+    try:
+        ws = websocket.create_connection(shell_url)
+        print("🟢 Connected to shell session.")
+        time.sleep(1)
+        command = "show route 0.0.0.0 | display json | no-more\nDONE!"
+        ws.send_binary(bytearray(map(ord, f"\00{command}")))
+
+        output_lines = []
+        while True:
+            data = ws.recv()
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="ignore")
+            output_lines.append(data)
+            print(data, end="")
+            if "DONE!" in data:
+                break
+        ws.close()
+
+        with open("ws_def_route.log", "w", encoding="utf-8") as f:
+            f.write("".join(output_lines))
+        print("✅ WebSocket output saved to ws_def_route.log")
+
+    except Exception as e:
+        print(f"❌ Error during shell session: {e}")
+    clean_ws_log_to_csv(log_file="ws_def_route.log", output_csv="RouteDefault.csv")
+
+def show_dhcp_security_binding():
+    """
+    Launches a shell session and runs 'show dhcp-security binding' on the selected device.
+    Saves output to ws_dhcp.log.
+    """
+    logging.info("Launching shell to run 'show dhcp-security binding'...")
+    site_id, device_id = select_site_and_device()
+    if not site_id or not device_id:
+        return
+
+    shell_url = create_shell_session(site_id, device_id)
+    if not shell_url:
+        logging.error("❌ Could not create shell session.")
+        return
+
+    try:
+        ws = websocket.create_connection(shell_url)
+        print("🟢 Connected to shell session.")
+        time.sleep(1)
+        command = "show dhcp-security binding | display json | no-more\nDONE!"
+        ws.send_binary(bytearray(map(ord, f"\00{command}")))
+
+        output_lines = []
+        while True:
+            data = ws.recv()
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="ignore")
+            output_lines.append(data)
+            print(data, end="")
+            if "DONE!" in data:
+                break
+        ws.close()
+
+        with open("ws_dhcp.log", "w", encoding="utf-8") as f:
+            f.write("".join(output_lines))
+        print("✅ DHCP security binding output saved to ws_dhcp.log")
+
+    except Exception as e:
+        print(f"❌ Error during shell session: {e}")
+
+def show_vlans():
+    """
+    Launches a shell session and runs 'show vlans' on the selected device.
+    Saves output to ws_vlans.log.
+    """
+    logging.info("Launching shell to run 'show vlans'...")
+    site_id, device_id = select_site_and_device()
+    if not site_id or not device_id:
+        return
+
+    shell_url = create_shell_session(site_id, device_id)
+    if not shell_url:
+        logging.error("âŒ Could not create shell session.")
+        return
+
+    try:
+        ws = websocket.create_connection(shell_url)
+        print("Connected to shell session.")
+        time.sleep(1)
+        command = "show vlans | display json | no-more\nDONE!"
+        ws.send_binary(bytearray(map(ord, f"\00{command}")))
+
+        output_lines = []
+        while True:
+            data = ws.recv()
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="ignore")
+            output_lines.append(data)
+            print(data, end="")
+            if "DONE!" in data:
+                break
+        ws.close()
+
+        with open("ws_vlans.log", "w", encoding="utf-8") as f:
+            f.write("".join(output_lines))
+        print("VLANs output saved to ws_vlans.log")
+
+    except Exception as e:
+        print(f"Error during shell session: {e}")
+
+def run_shell_command_and_log(command, log_filename, csv_output=None, description="Running shell command"):
+    logging.info(f"Launching shell to run: {description}")
+    site_id, device_id = select_site_and_device()
+    if not site_id or not device_id:
+        return
+
+    shell_url = create_shell_session(site_id, device_id)
+    if not shell_url:
+        logging.error("❌ Could not create shell session.")
+        return
+
+    try:
+        ws = websocket.create_connection(shell_url)
+        print("🟢 Connected to shell session.")
+        time.sleep(1)
+        ws.send_binary(bytearray(map(ord, f"\00{command}")))
+        output_lines = []
+
+        while True:
+            data = ws.recv()
+            if isinstance(data, bytes):
+                data = data.decode("utf-8", errors="ignore")
+            output_lines.append(data)
+            print(data, end="")
+            if "DONE!" in data:
+                break
+
+        ws.close()
+        with open(log_filename, "w", encoding="utf-8") as f:
+            f.write("".join(output_lines))
+        print(f"✅ Output saved to {log_filename}")
+
+        if csv_output:
+            clean_ws_log_to_csv(log_file=log_filename, output_csv=csv_output)
+
+    except Exception as e:
+        print(f"❌ Error during shell session: {e}")
+
+def clean_ws_log_to_csv(log_file, output_csv):
+    """
+    Cleans a WebSocket log file, extracts the first valid JSON object,
+    and writes it to a CSV file.
+    """
+    import re
+    import json
+
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Remove null characters and non-printable characters
+        cleaned = ''.join(c for c in content if c.isprintable())
+
+        # Remove known shell prompts and noise
+        cleaned = re.sub(r"{master:.*?}\s*", "", cleaned)
+        cleaned = re.sub(r"mist@\S+>\s*", "", cleaned)
+
+        # Try to extract the first valid JSON object
+        json_candidates = re.findall(r"{.*}", cleaned, re.DOTALL)
+        json_data = None
+
+        for candidate in json_candidates:
+            try:
+                json_data = json.loads(candidate)
+                break  # Stop at the first valid JSON
+            except json.JSONDecodeError:
+                continue
+
+        if not json_data:
+            print("⚠️ No valid JSON block found in log.")
+            return
+
+        # Flatten and write to CSV
+        flattened = flatten_all_nested_fields([json_data])
+        write_data_to_csv(flattened, output_csv)
+        print(f"✅ Extracted JSON written to {output_csv}")
+
+    except Exception as e:
+        print(f"❌ Failed to clean {log_file}: {e}")
+
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -2108,6 +2349,9 @@ menu_actions = {
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
     "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket"),
     "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN) Stop with CTRL+C or create 'stop_loop.txt'"),
+    "38": (lambda: run_shell_command_and_log(command="show route 0.0.0.0 | display json | no-more\nDONE!",log_filename="ws_def_route.log",csv_output="RouteDefault.csv",description="Show default route"), "Run 'show route 0.0.0.0' on a selected device via shell session"),
+    "39": (lambda: run_shell_command_and_log(command="show dhcp-security binding | display json | no-more\nDONE!",log_filename="ws_dhcp.log",csv_output="DhcpSecurityBindings.csv",description="Show DHCP security bindings"), "Run 'show dhcp-security binding' on a selected device via shell session"),
+    "40": (lambda: run_shell_command_and_log(command="show vlans | display json | no-more\nDONE! ",log_filename="ws_vlans.log",csv_output="Vlans.csv",description="Show VLANs"), "Run 'show vlans' on a selected device via shell session"),
 }
 
 def main():
