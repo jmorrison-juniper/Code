@@ -2215,13 +2215,15 @@ def get_dynamic_delay(smoothed_delay=None):
     k_i = tuning_data["k_i"]
     delay_integral = tuning_data.get("integral", 0.0)
     error_history = tuning_data.get("error", [])
-    back_calc_gain = tuning_data.get("back_calc_gain", 0.1)  # NEW
+    back_calc_gain = tuning_data.get("back_calc_gain", 0.1)
 
     try:
         now = datetime.now(timezone.utc)
         current_time = time.time()
         elapsed = current_time - _api_usage_cache["last_updated"]
+        previous_elapsed = _api_usage_cache.get("previous_elapsed", elapsed)
 
+        # Sync with real API usage if needed
         if not _api_usage_cache["initialized"] or \
            _api_usage_cache["perceived_requests"] >= 100 or \
            elapsed > 60:
@@ -2237,19 +2239,26 @@ def get_dynamic_delay(smoothed_delay=None):
             _api_usage_cache["last_updated"] = current_time
             _api_usage_cache["perceived_requests"] += 1
 
-        used = _api_usage_cache["used"]
+        used = min(_api_usage_cache["used"], _api_usage_cache["limit"])
         limit = _api_usage_cache["limit"]
         seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
-        seconds_remaining = 3600 - seconds_elapsed
+        seconds_remaining = max(3600 - seconds_elapsed, 1)
         ideal_used = (seconds_elapsed / 3600) * limit
         error = used - ideal_used
 
-        # Compute unsaturated delay
-        base_delay = seconds_remaining / max(limit - used, 1)
-        unsat_delay = base_delay + k_p * error + k_i * delay_integral
+        # Reset or decay integral if time reset is detected
+        if seconds_elapsed < previous_elapsed:
+            delay_integral *= 0.5
 
-        # Clamp delay to non-negative
-        sat_delay = max(unsat_delay, 0)
+        _api_usage_cache["previous_elapsed"] = seconds_elapsed
+
+        # Compute base delay safely
+        remaining_requests = max(limit - used, 1)
+        base_delay = min(seconds_remaining / remaining_requests, 10)  # clamp base delay
+
+        # Compute unsaturated delay
+        unsat_delay = base_delay + k_p * error + k_i * delay_integral
+        sat_delay = max(min(unsat_delay, 10), 0)  # clamp final delay to 10s max
 
         # Back-calculation anti-windup
         delay_integral += back_calc_gain * (sat_delay - unsat_delay)
