@@ -47,6 +47,15 @@ logging.basicConfig(
     handlers=[log_handler]
 )
 
+_api_usage_cache = {
+    "timestamp": 0,
+    "used": 0,
+    "limit": 5000,
+    "last_updated": 0,
+    "perceived_requests": 0,
+    "initialized": False  # 👈 new flag
+}
+
 current_epoch = int(time.time()) # Get the current epoch timestamp
 past_epoch = current_epoch - 24 * 3600 # 24 hours * 3600 seconds/hour
 
@@ -863,25 +872,51 @@ def export_all_site_settings():
 def export_all_gateway_device_configs():
     """
     Fetches and exports configuration details for all gateway devices across all sites in the organization
-    to AllSiteGatewayConfigs.csv. Adds detailed logging at each step.
+    to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with key WAN port info.
     """
     logging.info("Starting export of all gateway device configurations...")  # Log start
     org_id = get_org_id()
     logging.debug(f"Using org_id: {org_id} for gateway device configs export.")
-    
 
     # Fetch all gateway device configs using the helper function
     data = fetch_all_gateway_device_configs(apisession, org_id)
-    
+
     if data:
         logging.info(f"Fetched configs for {len(data)} gateway devices. Flattening and sanitizing data...")
+
         # Flatten nested fields for CSV compatibility
-        data = flatten_all_nested_fields(data)
-        # Escape multiline strings for CSV compatibility
-        data = escape_multiline_strings(data)
-        # Write the processed data to a CSV file
-        write_data_to_csv(data, "AllSiteGatewayConfigs.csv")
+        flattened = flatten_all_nested_fields(data)
+        sanitized = escape_multiline_strings(flattened)
+
+        # Write the full data to AllSiteGatewayConfigs.csv
+        write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
         logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
+
+        # Generate filtered output for ports 0/0/0, 0/0/1, 0/0/2
+        filtered_rows = []
+        for row in sanitized:
+            device_name = row.get("name", "")
+            for port in ["ge-0/0/0", "ge-0/0/1", "ge-0/0/2"]:
+                filtered_rows.append({
+                    "Device Name": device_name,
+                    "Port Name": port,
+                    "Port Description": row.get(f"port_config_{port}_name", ""),
+                    "Port Status": "disabled" if str(row.get(f"port_config_{port}_disabled", "")).lower() == "true" else "enabled",
+                    "Gateway IP": row.get(f"port_config_{port}_ip_config_gateway", ""),
+                    "IP Address": row.get(f"port_config_{port}_ip_config_ip", ""),
+                    "Netmask": row.get(f"port_config_{port}_ip_config_netmask", ""),
+                    "Config Type": row.get(f"port_config_{port}_ip_config_type", ""),
+                    "Override": "Yes" if str(row.get(f"port_config_{port}_wan_source_nat_disabled", "")).lower() == "true" else "No"
+                })
+
+        # Write the filtered data to a new CSV
+        filtered_fields = [
+            "Device Name", "Port Name", "Port Description", "Port Status",
+            "Gateway IP", "IP Address", "Netmask", "Config Type", "Override"
+        ]
+        write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
+        logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
+
     else:
         logging.warning("⚠️ No device configs found.")
 
@@ -1902,18 +1937,6 @@ def run_arp_via_websocket(site_id=None, device_id=None):
     if session_id:
         listen_for_command_output(mist_host.replace("api.", "api-ws."), mist_apitoken, site_id, device_id, session_id)
 
-def _load_env(env_file: str, mist_host: str, mist_apitoken: str, mist_site_id: str, mist_device_id: str = ""):
-    if env_file.startswith("~/"):
-        env_file = os.path.join(os.path.expanduser("~"), env_file.replace("~/", ""))
-    load_dotenv(dotenv_path=env_file, override=True)
-
-    mist_host = os.getenv("MIST_HOST", mist_host)
-    mist_apitoken = os.getenv("MIST_APITOKEN", mist_apitoken)
-    mist_site_id = os.getenv("MIST_SITE_ID", mist_site_id)
-    mist_device_id = os.getenv("MIST_DEVICE_ID", mist_device_id)
-
-    return mist_host, mist_apitoken, mist_site_id, mist_device_id
-
 def loop_refresh_core_datasets(delay=None, debug=False):
     """
     Continuously refreshes core datasets with optional dynamic delay based on API usage.
@@ -1986,81 +2009,6 @@ def compute_dynamic_alpha(errors, min_alpha=0.1, max_alpha=0.9):
     alpha = min_alpha + (max_alpha - min_alpha) * normalized
     return round(alpha, 3)
 
-def get_dynamic_delay(smoothed_delay=None):
-    """
-    Calculates a delay between API calls using PI feedback control with adaptive gain.
-    Applies exponential smoothing with dynamic alpha based on error volatility.
-    Returns (smoothed_delay, delay_in_seconds)
-    """
-    tuning_data = load_tuning_data()
-    k_p = tuning_data["k_p"]
-    k_i = tuning_data["k_i"]
-    delay_integral = tuning_data.get("integral", 0.0)
-    error_history = tuning_data.get("error", [])
-
-    try:
-        usage = mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data
-        limit = usage.get("request_limit", 5000)
-        used = usage.get("requests", 0)
-
-        now = datetime.now(timezone.utc)
-        seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
-        seconds_remaining = 3600 - seconds_elapsed
-
-        ideal_used = (seconds_elapsed / 3600) * limit
-        error = used - ideal_used
-        delay_integral += error
-        delay_integral = max(min(delay_integral, 10000), -10000)
-        delay_integral *= 0.99
-
-        progress = seconds_elapsed / 3600
-        k_p *= (1 - progress)
-
-        base_delay = seconds_remaining / max(limit - used, 1)
-        raw_delay = base_delay + k_p * error + k_i * delay_integral
-
-        error_history.append(error)
-        alpha = compute_dynamic_alpha(error_history)
-
-        if smoothed_delay is None:
-            smoothed_delay = raw_delay
-        else:
-            smoothed_delay = alpha * raw_delay + (1 - alpha) * smoothed_delay
-
-        # Clamp to non-negative delay
-        if smoothed_delay < 0:
-            logging.warning("⚠️ Smoothed delay was negative. Clamped to 0.")
-        delay_in_seconds = max(smoothed_delay, 0)
-
-        # Log metrics in milliseconds
-        table = PrettyTable()
-        table.field_names = ["Metric", "Value"]
-        table.add_row(["Used", used])
-        table.add_row(["Limit", limit])
-        table.add_row(["Elapsed (s)", f"{seconds_elapsed:.2f}"])
-        table.add_row(["Ideal Used", f"{ideal_used:.2f}"])
-        table.add_row(["Error", f"{error:.2f}"])
-        table.add_row(["Integral", f"{delay_integral:.2f}"])
-        table.add_row(["k_p", f"{k_p:.10f}"])
-        table.add_row(["k_i", f"{k_i:.10f}"])
-        table.add_row(["Base Delay (ms)", f"{base_delay * 1000:.2f} ms"])
-        table.add_row(["Raw Delay (ms)", f"{raw_delay * 1000:.2f} ms"])
-        table.add_row(["Smoothed Delay (ms)", f"{smoothed_delay * 1000:.2f} ms"])
-        table.add_row(["Dynamic Alpha", f"{alpha:.2f}"])
-        logging.info("\n" + table.get_string())
-
-        tuning_data["error"] = error_history[-20:]
-        tuning_data["integral"] = delay_integral
-        adjust_gains(tuning_data)
-        save_tuning_data(tuning_data)
-
-        return smoothed_delay, delay_in_seconds
-
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
-        return smoothed_delay, 0.5
-
-
     """
     Launches a shell session, runs 'show route 0.0.0.0 | display json | no-more',
     and saves the output to ws.log.
@@ -2099,47 +2047,6 @@ def get_dynamic_delay(smoothed_delay=None):
 
     except Exception as e:
         print(f"❌ Error during shell session: {e}")
-
-def show_route_default():
-    """
-    Launches a shell session, runs 'show route 0.0.0.0 | display json | no-more',
-    and saves the output to ws.log.
-    """
-    logging.info("Launching shell to run 'show route 0.0.0.0'...")
-    site_id, device_id = select_site_and_device()
-    if not site_id or not device_id:
-        return
-
-    shell_url = create_shell_session(site_id, device_id)
-    if not shell_url:
-        logging.error("❌ Could not create shell session.")
-        return
-
-    try:
-        ws = websocket.create_connection(shell_url)
-        print("🟢 Connected to shell session.")
-        time.sleep(1)
-        command = "show route 0.0.0.0 | display json | no-more\nDONE!"
-        ws.send_binary(bytearray(map(ord, f"\00{command}")))
-
-        output_lines = []
-        while True:
-            data = ws.recv()
-            if isinstance(data, bytes):
-                data = data.decode("utf-8", errors="ignore")
-            output_lines.append(data)
-            print(data, end="")
-            if "DONE!" in data:
-                break
-        ws.close()
-
-        with open("ws_def_route.log", "w", encoding="utf-8") as f:
-            f.write("".join(output_lines))
-        print("✅ WebSocket output saved to ws_def_route.log")
-
-    except Exception as e:
-        print(f"❌ Error during shell session: {e}")
-    clean_ws_log_to_csv(log_file="ws_def_route.log", output_csv="RouteDefault.csv")
 
 def show_dhcp_security_binding():
     """
@@ -2301,6 +2208,89 @@ def clean_ws_log_to_csv(log_file, output_csv):
     except Exception as e:
         print(f"❌ Failed to clean {log_file}: {e}")
 
+def get_dynamic_delay(smoothed_delay=None):
+    global _api_usage_cache
+    tuning_data = load_tuning_data()
+    k_p = tuning_data["k_p"]
+    k_i = tuning_data["k_i"]
+    delay_integral = tuning_data.get("integral", 0.0)
+    error_history = tuning_data.get("error", [])
+    back_calc_gain = tuning_data.get("back_calc_gain", 0.1)  # NEW
+
+    try:
+        now = datetime.now(timezone.utc)
+        current_time = time.time()
+        elapsed = current_time - _api_usage_cache["last_updated"]
+
+        if not _api_usage_cache["initialized"] or \
+           _api_usage_cache["perceived_requests"] >= 100 or \
+           elapsed > 60:
+            usage = mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data
+            _api_usage_cache["used"] = usage.get("requests", 0)
+            _api_usage_cache["limit"] = usage.get("request_limit", 5000)
+            _api_usage_cache["last_updated"] = current_time
+            _api_usage_cache["perceived_requests"] = 0
+            _api_usage_cache["initialized"] = True
+        else:
+            estimated_growth = round((_api_usage_cache["limit"] / 3600) * elapsed)
+            _api_usage_cache["used"] += estimated_growth
+            _api_usage_cache["last_updated"] = current_time
+            _api_usage_cache["perceived_requests"] += 1
+
+        used = _api_usage_cache["used"]
+        limit = _api_usage_cache["limit"]
+        seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
+        seconds_remaining = 3600 - seconds_elapsed
+        ideal_used = (seconds_elapsed / 3600) * limit
+        error = used - ideal_used
+
+        # Compute unsaturated delay
+        base_delay = seconds_remaining / max(limit - used, 1)
+        unsat_delay = base_delay + k_p * error + k_i * delay_integral
+
+        # Clamp delay to non-negative
+        sat_delay = max(unsat_delay, 0)
+
+        # Back-calculation anti-windup
+        delay_integral += back_calc_gain * (sat_delay - unsat_delay)
+
+        # Smoothing
+        error_history.append(error)
+        alpha = compute_dynamic_alpha(error_history)
+        smoothed_delay = sat_delay if smoothed_delay is None else alpha * sat_delay + (1 - alpha) * smoothed_delay
+        delay_in_seconds = max(smoothed_delay, 0)
+
+        # Logging
+        table = PrettyTable()
+        table.field_names = ["Metric", "Value"]
+        table.add_row(["Used", f"{used:.2f}"])
+        table.add_row(["Limit", limit])
+        table.add_row(["Elapsed (s)", f"{seconds_elapsed:.2f}"])
+        table.add_row(["Ideal Used", f"{ideal_used:.2f}"])
+        table.add_row(["Error", f"{error:.2f}"])
+        table.add_row(["Integral", f"{delay_integral:.2f}"])
+        table.add_row(["k_p", f"{k_p:.10f}"])
+        table.add_row(["k_i", f"{k_i:.10f}"])
+        table.add_row(["Base Delay (ms)", f"{base_delay * 1000:.2f} ms"])
+        table.add_row(["Unsat Delay (ms)", f"{unsat_delay * 1000:.2f} ms"])
+        table.add_row(["Final Delay (s)", f"{delay_in_seconds:.3f}"])
+        table.add_row(["Dynamic Alpha", f"{alpha:.2f}"])
+        logging.info("\n" + table.get_string())
+
+        # Save updated tuning data
+        tuning_data["error"] = error_history[-20:]
+        tuning_data["integral"] = delay_integral
+        tuning_data["back_calc_gain"] = back_calc_gain
+        adjust_gains(tuning_data)
+        save_tuning_data(tuning_data)
+
+        return smoothed_delay, delay_in_seconds
+
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
+        return smoothed_delay, 0.5
+
+
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -2347,7 +2337,7 @@ menu_actions = {
     "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
     "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
-    "34": (run_arp_via_websocket, "Run ARP command on a device and receive output via WebSocket"),
+    "34": (run_arp_via_websocket, "Run ARP command on an AP and receive output via WebSocket"),
     "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN) Stop with CTRL+C or create 'stop_loop.txt'"),
     "38": (lambda: run_shell_command_and_log(command="show route 0.0.0.0 | display json | no-more\nDONE!",log_filename="ws_def_route.log",csv_output="RouteDefault.csv",description="Show default route"), "Run 'show route 0.0.0.0' on a selected device via shell session"),
     "39": (lambda: run_shell_command_and_log(command="show dhcp-security binding | display json | no-more\nDONE!",log_filename="ws_dhcp.log",csv_output="DhcpSecurityBindings.csv",description="Show DHCP security bindings"), "Run 'show dhcp-security binding' on a selected device via shell session"),
