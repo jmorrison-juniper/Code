@@ -1,3 +1,11 @@
+### Attention COPILOT: Please always give me the full complete top level copies of each function definition or class that needs replaced by copy and paste.##
+### When using timestamps always use "timestamp": datetime.now(timezone.utc).isoformat() ##
+### Unless i explicitly ask for data to be graphed or plotted, i usually just want you to read the data or logs and understand what is going on. ##
+### We always want to conserve API requests, so if we have a CSV file that is fresh enough, we will use it instead of making an API call. ##
+### When generating code, always add comments inline with the code to explain what each part does. ##
+### If i send you code that is missing comments and you can confidently show me what the code does, please add comments to the code. ##
+### Keep all functions and classes named whith long descriptive names that are easy to understand and similar to the rest of the names in the codebase. ##
+
 import subprocess
 import sys
 
@@ -53,7 +61,7 @@ _api_usage_cache = {
     "limit": 5000,
     "last_updated": 0,
     "perceived_requests": 0,
-    "initialized": False  # 👈 new flag
+    "initialized": False 
 }
 
 current_epoch = int(time.time()) # Get the current epoch timestamp
@@ -872,53 +880,48 @@ def export_all_site_settings():
 def export_all_gateway_device_configs():
     """
     Fetches and exports configuration details for all gateway devices across all sites in the organization
-    to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with key WAN port info.
+    to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with selected fields and port info.
     """
-    logging.info("Starting export of all gateway device configurations...")  # Log start
+    logging.info("Starting export of all gateway device configurations...")
     org_id = get_org_id()
-    logging.debug(f"Using org_id: {org_id} for gateway device configs export.")
-
-    # Fetch all gateway device configs using the helper function
     data = fetch_all_gateway_device_configs(apisession, org_id)
 
-    if data:
-        logging.info(f"Fetched configs for {len(data)} gateway devices. Flattening and sanitizing data...")
-
-        # Flatten nested fields for CSV compatibility
-        flattened = flatten_all_nested_fields(data)
-        sanitized = escape_multiline_strings(flattened)
-
-        # Write the full data to AllSiteGatewayConfigs.csv
-        write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
-        logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
-
-        # Generate filtered output for ports 0/0/0, 0/0/1, 0/0/2
-        filtered_rows = []
-        for row in sanitized:
-            device_name = row.get("name", "")
-            for port in ["ge-0/0/0", "ge-0/0/1", "ge-0/0/2"]:
-                filtered_rows.append({
-                    "Device Name": device_name,
-                    "Port Name": port,
-                    "Port Description": row.get(f"port_config_{port}_name", ""),
-                    "Port Status": "disabled" if str(row.get(f"port_config_{port}_disabled", "")).lower() == "true" else "enabled",
-                    "Gateway IP": row.get(f"port_config_{port}_ip_config_gateway", ""),
-                    "IP Address": row.get(f"port_config_{port}_ip_config_ip", ""),
-                    "Netmask": row.get(f"port_config_{port}_ip_config_netmask", ""),
-                    "Config Type": row.get(f"port_config_{port}_ip_config_type", ""),
-                    "Override": "Yes" if str(row.get(f"port_config_{port}_wan_source_nat_disabled", "")).lower() == "true" else "No"
-                })
-
-        # Write the filtered data to a new CSV
-        filtered_fields = [
-            "Device Name", "Port Name", "Port Description", "Port Status",
-            "Gateway IP", "IP Address", "Netmask", "Config Type", "Override"
-        ]
-        write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
-        logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
-
-    else:
+    if not data:
         logging.warning("⚠️ No device configs found.")
+        return
+
+    # Flatten and sanitize for CSV compatibility
+    flattened = flatten_all_nested_fields(data)
+    sanitized = escape_multiline_strings(flattened)
+
+    # Save full data
+    write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
+    logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
+
+    # Define base columns to keep
+    base_columns = [
+        "mac", "managed", "model", "name", "ntp_servers",
+        "oob_ip_config_node1_type", "oob_ip_config_type", "ospf_config_enabled"
+    ]
+
+    # Dynamically find matching port_config_ge-0/0/*_* columns (excluding _vpn_paths_)
+    port_columns = [
+        col for col in sanitized[0].keys()
+        if re.match(r"port_config_ge-0/0/\d+_.*", col) and "_vpn_paths_" not in col
+    ]
+
+    # Combine all columns to keep
+    columns_to_keep = base_columns + port_columns
+
+    # Filter rows: keep only those with at least one non-empty port_config_ge-0/0/*_* value
+    filtered_rows = []
+    for row in sanitized:
+        if any(row.get(col) not in [None, "", "null"] for col in port_columns):
+            filtered_rows.append({col: row.get(col, "") for col in columns_to_keep})
+
+    # Write filtered output
+    write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
+    logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
 
 def fetch_all_gateway_device_configs(apisession, org_id):
     """
@@ -1986,17 +1989,27 @@ def save_tuning_data(data):
         json.dump(data, f, indent=2)
 
 def adjust_gains(data):
-    # Adjust gains based on recent error trend
+    """
+    Adjusts PID gains based on the trend of recent errors.
+    If error is increasing (positive trend), increase gains.
+    If error is decreasing (negative trend), decrease gains.
+    """
     recent_errors = data["error"][-10:]
     if not recent_errors:
         return
+
     error_trend = sum(recent_errors) / len(recent_errors)
+
     if error_trend > 0:
         data["k_p"] *= 1.05
         data["k_i"] *= 1.05
     elif error_trend < 0:
         data["k_p"] *= 0.95
         data["k_i"] *= 0.95
+
+    # Clamp gains to prevent runaway values
+    data["k_p"] = min(max(data["k_p"], 1e-6), 1.0)
+    data["k_i"] = min(max(data["k_i"], 1e-8), 0.01)
 
 def compute_dynamic_alpha(errors, min_alpha=0.1, max_alpha=0.9):
     """
@@ -2208,14 +2221,37 @@ def clean_ws_log_to_csv(log_file, output_csv):
     except Exception as e:
         print(f"❌ Failed to clean {log_file}: {e}")
 
+def append_delay_metrics_to_json(delay_metrics, api_cache, tuning_data, filename="delay_metrics.json"):
+    """
+    Appends delay metrics, API cache, and tuning data to a JSON file.
+    Each call writes a new line with a timestamped entry.
+    """
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "delay_metrics": delay_metrics,
+        "api_cache": api_cache,
+        "tuning_data": tuning_data
+    }
+    try:
+        with open(filename, "a", encoding="utf-8") as f:
+            json.dump(log_entry, f)
+            f.write("\n")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to write delay metrics to {filename}: {e}")
+
 def get_dynamic_delay(smoothed_delay=None):
     global _api_usage_cache
     tuning_data = load_tuning_data()
+
+    # Reset gains if out of bounds
+    if tuning_data["k_p"] < 1e-6 or tuning_data["k_i"] < 1e-8 or tuning_data["k_p"] > 1.0 or tuning_data["k_i"] > 0.01:
+        tuning_data["k_p"] = 0.1
+        tuning_data["k_i"] = 0.001
+
     k_p = tuning_data["k_p"]
     k_i = tuning_data["k_i"]
     delay_integral = tuning_data.get("integral", 0.0)
     error_history = tuning_data.get("error", [])
-    back_calc_gain = tuning_data.get("back_calc_gain", 0.1)
 
     try:
         now = datetime.now(timezone.utc)
@@ -2223,7 +2259,6 @@ def get_dynamic_delay(smoothed_delay=None):
         elapsed = current_time - _api_usage_cache["last_updated"]
         previous_elapsed = _api_usage_cache.get("previous_elapsed", elapsed)
 
-        # Sync with real API usage if needed
         if not _api_usage_cache["initialized"] or \
            _api_usage_cache["perceived_requests"] >= 100 or \
            elapsed > 60:
@@ -2241,50 +2276,37 @@ def get_dynamic_delay(smoothed_delay=None):
 
         used = min(_api_usage_cache["used"], _api_usage_cache["limit"])
         limit = _api_usage_cache["limit"]
+
         seconds_elapsed = now.minute * 60 + now.second + now.microsecond / 1_000_000
         seconds_remaining = max(3600 - seconds_elapsed, 1)
         ideal_used = (seconds_elapsed / 3600) * limit
         error = used - ideal_used
 
-        # Reset or decay integral if time reset is detected
         if seconds_elapsed < previous_elapsed:
+            logging.info("🕒 Hour boundary crossed. Resetting integral.")
             delay_integral *= 0.5
 
         _api_usage_cache["previous_elapsed"] = seconds_elapsed
-
-        # Compute base delay safely
         remaining_requests = max(limit - used, 1)
-        base_delay = min(seconds_remaining / remaining_requests, 10)  # clamp base delay
+        base_delay = min(seconds_remaining / remaining_requests, 10)
 
-        # Compute unsaturated delay
         unsat_delay = base_delay + k_p * error + k_i * delay_integral
-        sat_delay = max(min(unsat_delay, 10), 0)  # clamp final delay to 10s max
+        sat_delay = max(min(unsat_delay, 10), 0.2)
 
-        # Back-calculation anti-windup
-        delay_integral += back_calc_gain * (sat_delay - unsat_delay)
+        # 🔁 Adaptive back_calc_gain
+        back_calc_gain = min(max(abs(sat_delay - unsat_delay) / 10, 0.01), 0.5)
 
-        # Smoothing
+        # 🔁 Decaying integral update
+        decay_factor = 0.98
+        delay_integral = delay_integral * decay_factor + back_calc_gain * (sat_delay - unsat_delay)
+        delay_integral = max(min(delay_integral, 1000), -1000)
+
         error_history.append(error)
         alpha = compute_dynamic_alpha(error_history)
         smoothed_delay = sat_delay if smoothed_delay is None else alpha * sat_delay + (1 - alpha) * smoothed_delay
-        delay_in_seconds = max(smoothed_delay, 0)
+        delay_in_seconds = max(smoothed_delay, 0.2)
 
-        # Logging
-        table = PrettyTable()
-        table.field_names = ["Metric", "Value"]
-        table.add_row(["Used", f"{used:.2f}"])
-        table.add_row(["Limit", limit])
-        table.add_row(["Elapsed (s)", f"{seconds_elapsed:.2f}"])
-        table.add_row(["Ideal Used", f"{ideal_used:.2f}"])
-        table.add_row(["Error", f"{error:.2f}"])
-        table.add_row(["Integral", f"{delay_integral:.2f}"])
-        table.add_row(["k_p", f"{k_p:.10f}"])
-        table.add_row(["k_i", f"{k_i:.10f}"])
-        table.add_row(["Base Delay (ms)", f"{base_delay * 1000:.2f} ms"])
-        table.add_row(["Unsat Delay (ms)", f"{unsat_delay * 1000:.2f} ms"])
-        table.add_row(["Final Delay (s)", f"{delay_in_seconds:.3f}"])
-        table.add_row(["Dynamic Alpha", f"{alpha:.2f}"])
-        logging.info("\n" + table.get_string())
+        logging.info(f"Sleeping for {delay_in_seconds:.3f} seconds")
 
         # Save updated tuning data
         tuning_data["error"] = error_history[-20:]
@@ -2292,6 +2314,17 @@ def get_dynamic_delay(smoothed_delay=None):
         tuning_data["back_calc_gain"] = back_calc_gain
         adjust_gains(tuning_data)
         save_tuning_data(tuning_data)
+
+        delay_metrics = {
+            "used": used,
+            "limit": limit,
+            "error": error,
+            "base_delay": base_delay,
+            "unsat_delay": unsat_delay,
+            "final_delay": delay_in_seconds,
+            "alpha": alpha
+        }
+        append_delay_metrics_to_json(delay_metrics, _api_usage_cache, tuning_data)
 
         return smoothed_delay, delay_in_seconds
 
