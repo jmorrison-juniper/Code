@@ -877,52 +877,6 @@ def export_all_site_settings():
     else:
         logging.warning("⚠️ No site configs found.")
 
-def export_all_gateway_device_configs():
-    """
-    Fetches and exports configuration details for all gateway devices across all sites in the organization
-    to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with selected fields and port info.
-    """
-    logging.info("Starting export of all gateway device configurations...")
-    org_id = get_org_id()
-    data = fetch_all_gateway_device_configs(apisession, org_id)
-
-    if not data:
-        logging.warning("⚠️ No device configs found.")
-        return
-
-    # Flatten and sanitize for CSV compatibility
-    flattened = flatten_all_nested_fields(data)
-    sanitized = escape_multiline_strings(flattened)
-
-    # Save full data
-    write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
-    logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
-
-    # Define base columns to keep
-    base_columns = [
-        "mac", "managed", "model", "name", "ntp_servers",
-        "oob_ip_config_node1_type", "oob_ip_config_type", "ospf_config_enabled"
-    ]
-
-    # Dynamically find matching port_config_ge-0/0/*_* columns (excluding _vpn_paths_)
-    port_columns = [
-        col for col in sanitized[0].keys()
-        if re.match(r"port_config_ge-0/0/\d+_.*", col) and "_vpn_paths_" not in col
-    ]
-
-    # Combine all columns to keep
-    columns_to_keep = base_columns + port_columns
-
-    # Filter rows: keep only those with at least one non-empty port_config_ge-0/0/*_* value
-    filtered_rows = []
-    for row in sanitized:
-        if any(row.get(col) not in [None, "", "null"] for col in port_columns):
-            filtered_rows.append({col: row.get(col, "") for col in columns_to_keep})
-
-    # Write filtered output
-    write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
-    logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
-
 def fetch_all_gateway_device_configs(apisession, org_id):
     """
     Fetches configuration details for all gateway devices across sites that have at least one gateway.
@@ -2239,6 +2193,55 @@ def append_delay_metrics_to_json(delay_metrics, api_cache, tuning_data, filename
     except Exception as e:
         logging.warning(f"⚠️ Failed to write delay metrics to {filename}: {e}")
 
+def export_all_gateway_device_configs(debug=False):
+    """
+    Fetches and exports configuration details for all gateway devices across all sites in the organization
+    to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with selected fields and port info.
+    """
+    logging.info("Starting export of all gateway device configurations...")
+    org_id = get_org_id()
+    data = fetch_all_gateway_device_configs(apisession, org_id)
+
+    if not data:
+        logging.warning("⚠️ No device configs found.")
+        return
+
+    # Flatten and sanitize for CSV compatibility
+    flattened = flatten_all_nested_fields(data)
+    sanitized = escape_multiline_strings(flattened)
+
+    # Save full data
+    write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
+    logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
+
+    # Define base columns to keep
+    base_columns = ["mac", "name"]
+
+    # Dynamically find matching port_config_ge-0/0/*_* columns (excluding _vpn_paths_)
+    port_columns = [
+        col for col in sanitized[0].keys()
+        if re.match(r"(?i)port_config_ge-0/0/\\d+_.*", col) and "_vpn_paths_" not in col
+    ]
+    columns_to_keep = base_columns + port_columns
+
+    # Filter rows: keep only those with at least one non-empty port config value
+    filtered_rows = [
+        {col: row.get(col, "") for col in columns_to_keep}
+        for row in sanitized
+        if any(row.get(col) not in [None, "", "null"] for col in port_columns)
+    ]
+
+    # ✅ FIX: Only write "No matching data found" if filtered_rows is truly empty
+    if not filtered_rows:
+        logging.warning("⚠️ No rows matched the port config filter. FilteredGatewayPortConfigs.csv will be empty.")
+        with open("FilteredGatewayPortConfigs.csv", "w", newline="", encoding="utf-8") as f:
+            f.write("No matching data found.\n")
+    else:
+        if debug:
+            logging.debug(f"Sample filtered row: {filtered_rows[0]}")
+        write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
+        logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
+
 def get_dynamic_delay(smoothed_delay=None):
     global _api_usage_cache
     tuning_data = load_tuning_data()
@@ -2259,9 +2262,13 @@ def get_dynamic_delay(smoothed_delay=None):
         elapsed = current_time - _api_usage_cache["last_updated"]
         previous_elapsed = _api_usage_cache.get("previous_elapsed", elapsed)
 
-        if not _api_usage_cache["initialized"] or \
-           _api_usage_cache["perceived_requests"] >= 100 or \
-           elapsed > 60:
+        # Hybrid refresh trigger: every 60s, every 100 requests, or top of the hour
+        if (
+            not _api_usage_cache["initialized"]
+            or _api_usage_cache["perceived_requests"] >= 100
+            or elapsed > 60
+            or (now.minute == 0 and now.second < 5)
+        ):
             usage = mistapi.api.v1.self.usage.getSelfApiUsage(apisession).data
             _api_usage_cache["used"] = usage.get("requests", 0)
             _api_usage_cache["limit"] = usage.get("request_limit", 5000)
@@ -2282,27 +2289,30 @@ def get_dynamic_delay(smoothed_delay=None):
         ideal_used = (seconds_elapsed / 3600) * limit
         error = used - ideal_used
 
+        # Detect hour boundary and decay integral
         if seconds_elapsed < previous_elapsed:
             logging.info("🕒 Hour boundary crossed. Resetting integral.")
             delay_integral *= 0.5
 
         _api_usage_cache["previous_elapsed"] = seconds_elapsed
+
         remaining_requests = max(limit - used, 1)
         base_delay = min(seconds_remaining / remaining_requests, 10)
 
         unsat_delay = base_delay + k_p * error + k_i * delay_integral
         sat_delay = max(min(unsat_delay, 10), 0.2)
 
-        # 🔁 Adaptive back_calc_gain
+        # Adaptive back_calc_gain
         back_calc_gain = min(max(abs(sat_delay - unsat_delay) / 10, 0.01), 0.5)
 
-        # 🔁 Decaying integral update
+        # Decaying integral update
         decay_factor = 0.98
         delay_integral = delay_integral * decay_factor + back_calc_gain * (sat_delay - unsat_delay)
         delay_integral = max(min(delay_integral, 1000), -1000)
 
         error_history.append(error)
         alpha = compute_dynamic_alpha(error_history)
+
         smoothed_delay = sat_delay if smoothed_delay is None else alpha * sat_delay + (1 - alpha) * smoothed_delay
         delay_in_seconds = max(smoothed_delay, 0.2)
 
