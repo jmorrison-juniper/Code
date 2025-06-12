@@ -877,57 +877,6 @@ def export_all_site_settings():
     else:
         logging.warning("⚠️ No site configs found.")
 
-def fetch_all_gateway_device_configs(apisession, org_id):
-    """
-    Fetches configuration details for all gateway devices across sites that have at least one gateway.
-    Uses org inventory to reduce unnecessary API calls.
-    """
-    logging.info("Fetching sites with gateways using org inventory...")
-    site_ids = get_sites_with_gateways(apisession, org_id)
-    logging.info(f"Found {len(site_ids)} sites with gateways.")
-
-    smoothed = None
-    all_device_configs = []
-
-    for site_id in tqdm(site_ids, desc="Sites", unit="site"):
-        try:
-            site_name = "Unknown"
-            # Optional: fetch site name from SiteList.csv if available
-            try:
-                with open("SiteList.csv", mode="r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        if row.get("id") == site_id:
-                            site_name = row.get("name", "Unnamed Site")
-                            break
-            except Exception:
-                pass
-
-            response = mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id, type="gateway", limit=1000)
-            devices = mistapi.get_all(response=response, mist_session=apisession)
-            logging.info(f"Found {len(devices)} gateway devices at site: {site_name} (ID: {site_id})")
-
-            for device in tqdm(devices, desc=f"{site_name}", unit="device", leave=False):
-                smoothed, delay = get_dynamic_delay(smoothed)
-                logging.info(f"[INFO] Sleeping for {delay}.")
-                time.sleep(delay)
-
-                device_id = device.get("id")
-                device_name = device.get("name", "Unnamed Device")
-                try:
-                    config = mistapi.api.v1.sites.devices.getSiteDevice(apisession, site_id, device_id).data
-                    config["site_id"] = site_id
-                    config["site_name"] = site_name
-                    all_device_configs.append(config)
-                    logging.info(f"✅ Fetched config for device: {device_name} (ID: {device_id}) at site: {site_name}")
-                except Exception as e:
-                    logging.warning(f"⚠️ Failed to fetch config for device {device_id} at {site_name}: {e}")
-        except Exception as e:
-            logging.warning(f"⚠️ Failed to list devices for site {site_id}: {e}")
-
-    logging.info(f"Fetched configs for {len(all_device_configs)} gateway devices across filtered sites.")
-    return all_device_configs
-
 def export_nac_event_definitions():
     """
     Export NAC (Network Access Control) event definitions to NacEventDefinitions.csv.
@@ -2193,45 +2142,34 @@ def append_delay_metrics_to_json(delay_metrics, api_cache, tuning_data, filename
     except Exception as e:
         logging.warning(f"⚠️ Failed to write delay metrics to {filename}: {e}")
 
-def export_all_gateway_device_configs(debug=False):
+def export_all_gateway_device_configs(debug=False, fast=False):
     """
     Fetches and exports configuration details for all gateway devices across all sites in the organization
     to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with selected fields and port info.
     """
     logging.info("Starting export of all gateway device configurations...")
     org_id = get_org_id()
-    data = fetch_all_gateway_device_configs(apisession, org_id)
-
+    data = fetch_all_gateway_device_configs(apisession, org_id, fast=fast)
     if not data:
         logging.warning("⚠️ No device configs found.")
         return
 
-    # Flatten and sanitize for CSV compatibility
     flattened = flatten_all_nested_fields(data)
     sanitized = escape_multiline_strings(flattened)
-
-    # Save full data
     write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
     logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
 
-    # Define base columns to keep
     base_columns = ["mac", "name"]
-
-    # Dynamically find matching port_config_ge-0/0/*_* columns (excluding _vpn_paths_)
     port_columns = [
         col for col in sanitized[0].keys()
-        if re.match(r"(?i)port_config_ge-0/0/\\d+_.*", col) and "_vpn_paths_" not in col
+        if re.match(r"(?i)port_config_ge-0/0/\d+_.*", col) and "_vpn_paths_" not in col
     ]
     columns_to_keep = base_columns + port_columns
-
-    # Filter rows: keep only those with at least one non-empty port config value
     filtered_rows = [
         {col: row.get(col, "") for col in columns_to_keep}
         for row in sanitized
         if any(row.get(col) not in [None, "", "null"] for col in port_columns)
     ]
-
-    # ✅ FIX: Only write "No matching data found" if filtered_rows is truly empty
     if not filtered_rows:
         logging.warning("⚠️ No rows matched the port config filter. FilteredGatewayPortConfigs.csv will be empty.")
         with open("FilteredGatewayPortConfigs.csv", "w", newline="", encoding="utf-8") as f:
@@ -2241,6 +2179,90 @@ def export_all_gateway_device_configs(debug=False):
             logging.debug(f"Sample filtered row: {filtered_rows[0]}")
         write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
         logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+
+def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers=None):
+    """
+    Fetches configuration details for all gateway devices in the org using org inventory.
+    If `fast` is True, fetches each device config concurrently using a thread per device.
+    
+    Args:
+        apisession: Authenticated Mist API session.
+        org_id: Organization ID.
+        fast (bool): If True, enables high-concurrency mode.
+        max_workers (int): Optional override for number of concurrent threads.
+    
+    Returns:
+        List of device configuration dictionaries.
+    """
+    logging.info("Fetching org inventory to find gateway devices...")
+    try:
+        response = mistapi.api.v1.orgs.inventory.getOrgInventory(apisession, org_id, limit=1000)
+        inventory = mistapi.get_all(response=response, mist_session=apisession)
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch org inventory: {e}")
+        return []
+
+    logging.info(f"Found {len(inventory)} total devices in org inventory.")
+
+    # Load site names from SiteList.csv for enrichment
+    site_name_lookup = {}
+    try:
+        with open("SiteList.csv", mode="r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            site_name_lookup = {row.get("id"): row.get("name", "Unnamed Site") for row in reader}
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to load SiteList.csv for site names: {e}")
+
+    # Filter for gateway devices and build work list
+    work_items = []
+    for device in inventory:
+        if device.get("type") == "gateway":
+            site_id = device.get("site_id")
+            device_id = device.get("id")
+            if site_id and device_id:
+                site_name = site_name_lookup.get(site_id, "Unknown")
+                work_items.append((site_id, device_id, site_name))
+
+    logging.info(f"Prepared {len(work_items)} gateway device config API calls.")
+
+    def fetch_config(site_id, device_id, site_name):
+        try:
+            config = mistapi.api.v1.sites.devices.getSiteDevice(apisession, site_id, device_id).data
+            config["site_id"] = site_id
+            config["site_name"] = site_name
+            logging.info(f"✅ Fetched config for device {device_id} at site {site_name}")
+            return config
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to fetch config for device {device_id} at site {site_name}: {e}")
+            return None
+    all_device_configs = []
+
+    if fast:
+        max_threads = max_workers or os.cpu_count() or 8
+        logging.info(f"🚀 Fast mode enabled: launching {len(work_items)} tasks with up to {max_threads} threads.")
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [executor.submit(fetch_config, sid, did, sname) for sid, did, sname in work_items]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Fetching Configs", unit="device"):
+                result = future.result()
+                if result:
+                    all_device_configs.append(result)
+    else:
+        logging.info("🐢 Fast mode disabled: using sequential rate-limited execution.")
+        smoothed = None
+        for site_id, device_id, site_name in tqdm(work_items, desc="Fetching Configs", unit="device"):
+            smoothed, delay = get_dynamic_delay(smoothed)
+            logging.info(f"[INFO] Sleeping for {delay:.2f} seconds.")
+            time.sleep(delay)
+            result = fetch_config(site_id, device_id, site_name)
+            if result:
+                all_device_configs.append(result)
+
+    logging.info(f"✅ Completed fetching {len(all_device_configs)} gateway device configs.")
+    return all_device_configs
+
 
 def get_dynamic_delay(smoothed_delay=None):
     global _api_usage_cache
@@ -2342,7 +2364,6 @@ def get_dynamic_delay(smoothed_delay=None):
         logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
         return smoothed_delay, 0.5
 
-
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (select_site, "Select a site (used by other functions)"),
@@ -2406,12 +2427,10 @@ def main():
     parser.add_argument("-P", "--port", help="Port ID")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     parser.add_argument("--delay", type=int, help="Fixed delay between loop iterations (in seconds). If omitted, delay is dynamic.")
-
+    parser.add_argument("--fast", action="store_true", help="Enable fast mode with multithreading (bypasses rate limiting)")
     args = parser.parse_args()
 
     global org_id
-
-    # If any CLI args are passed, override interactive mode
     if len(sys.argv) > 1:
         logging.info("CLI arguments detected, running in non-interactive mode.")
         if args.org:
@@ -2420,7 +2439,7 @@ def main():
         else:
             org_id = get_org_id()
 
-        # Resolve site name to site_id if needed
+        site_id = None
         if args.site:
             logging.info(f"Resolving site name '{args.site}' to site_id...")
             sites = mistapi.get_all(mistapi.api.v1.orgs.sites.listOrgSites(apisession, org_id), apisession)
@@ -2432,10 +2451,8 @@ def main():
                 sys.exit(1)
             else:
                 logging.info(f"Resolved site name '{args.site}' to site_id '{site_id}'.")
-        else:
-            site_id = None
 
-        # Resolve device name to device_id if needed
+        device_id = None
         if args.device and site_id:
             logging.info(f"Resolving device name '{args.device}' at site_id '{site_id}'...")
             devices = mistapi.get_all(mistapi.api.v1.sites.devices.listSiteDevices(apisession, site_id), apisession)
@@ -2447,27 +2464,21 @@ def main():
                 sys.exit(1)
             else:
                 logging.info(f"Resolved device name '{args.device}' to device_id '{device_id}'.")
-        else:
-            device_id = None
 
-        # Execute the selected menu action
         if args.menu in menu_actions:
             func, _ = menu_actions[args.menu]
             logging.info(f"Executing menu action '{args.menu}'.")
-
-            # Dynamically pass only accepted arguments
             func_args = {
                 "site_id": site_id,
                 "device_id": device_id,
                 "port": args.port,
                 "org_id": org_id,
-                "debug": args.debug
+                "debug": args.debug,
+                "delay": args.delay,
+                "fast": args.fast
             }
             sig = inspect.signature(func)
-            accepted_args = {
-                k: v for k, v in func_args.items()
-                if k in sig.parameters and v is not None
-            }
+            accepted_args = {k: v for k, v in func_args.items() if k in sig.parameters and v is not None}
             func(**accepted_args)
         else:
             logging.error(f"❌ Invalid menu option: {args.menu}")
@@ -2478,22 +2489,22 @@ def main():
         sys.exit(0)
 
     # --- Interactive Menu Fallback ---
-    if len(sys.argv) == 1:
-        logging.info("No CLI arguments detected, running in interactive menu mode.")
-        print("\nAvailable Options:")
-        for key, (func, description) in menu_actions.items():
-            print(f"{key}: {description}")
-        iwant = input("\nEnter your selection number now: ").strip()
-        selected = menu_actions.get(iwant)
-        if selected:
-            func, _ = selected
-            logging.info(f"User selected menu option '{iwant}'. Executing associated function.")
-            func()
-            sys.exit(0)
-        else:
-            logging.warning(f"Invalid selection '{iwant}' entered by user.")
-            print("Invalid selection. Please try again.")
-            sys.exit(1)
+    logging.info("No CLI arguments detected, running in interactive menu mode.")
+    print("\nAvailable Options:")
+    for key, (func, description) in menu_actions.items():
+        print(f"{key}: {description}")
+    iwant = input("\nEnter your selection number now: ").strip()
+    selected = menu_actions.get(iwant)
+    if selected:
+        func, _ = selected
+        logging.info(f"User selected menu option '{iwant}'. Executing associated function.")
+        func()
+        sys.exit(0)
+    else:
+        logging.warning(f"Invalid selection '{iwant}' entered by user.")
+        print("Invalid selection. Please try again.")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
