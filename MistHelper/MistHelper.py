@@ -108,24 +108,24 @@ def check_and_generate_csv(file_name, generate_function, freshness_minutes=15):
     generate_function()
     logging.info(f"✅ {file_name} generated or refreshed.")
 
-def prepare_and_write_csv(data, filename, sort_key=None):
+def prepare_data_and_write_csv(data, filename, sort_key=None):
     """
     Flattens, sanitizes, optionally sorts, and writes data to a CSV file.
     """
     # Flatten nested dictionaries and lists
-    data = flatten_all_nested_fields(data)
+    data = flatten_nested_fields_in_list(data)
     
     # Escape multiline strings for CSV compatibility
-    data = escape_multiline_strings(data)
+    data = escape_multiline_strings_for_csv(data)
     
     # Sort data by the specified key if provided
     if sort_key:
         data = sorted(data, key=lambda x: x.get(sort_key, ""))
     
     # Write the processed data to a CSV file
-    write_data_to_csv(data, filename)
+    write_dict_list_to_csv(data, filename)
 
-def display_pretty_table(data, fields=None, sortby=None):
+def display_dict_list_as_pretty_table(data, fields=None, sortby=None):
     """
     Displays a PrettyTable from a list of dictionaries.
     """
@@ -134,7 +134,7 @@ def display_pretty_table(data, fields=None, sortby=None):
         return
 
     # Use provided fields or extract all unique keys
-    fields = fields or get_all_unique_keys(data)
+    fields = fields or get_all_unique_dict_keys(data)
 
     # Initialize the PrettyTable with field names
     table = PrettyTable()
@@ -152,18 +152,18 @@ def display_pretty_table(data, fields=None, sortby=None):
     # Log the table as a string
     logging.info("\n" + table.get_string())
 
-def interactive_device_action(fetch_function, filename, description, device_type="all"):
+def interactive_fetch_device_data_to_csv(fetch_function, filename, description, device_type="all"):
     """
     Prompts user to select a site and device, fetches data using the provided function,
     and writes the result to a CSV file.
     """
     # Prompt user to select a site
-    site_id = prompt_user_to_select_site_id_from_csv()
+    site_id = prompt_select_site_id_from_csv()
     if not site_id:
         return
 
     # Prompt user to select a device at the selected site
-    device_id = prompt_user_to_select_device_id(site_id, device_type=device_type)
+    device_id = prompt_select_device_id_from_inventory(site_id, device_type=device_type)
     if not device_id:
         return
 
@@ -174,14 +174,14 @@ def interactive_device_action(fetch_function, filename, description, device_type
     stats = fetch_function(apisession, site_id, device_id).data
 
     # Flatten and sanitize the data
-    stats = flatten_all_nested_fields([stats])
-    stats = escape_multiline_strings(stats)
+    stats = flatten_nested_fields_in_list([stats])
+    stats = escape_multiline_strings_for_csv(stats)
 
     # Write the data to a CSV file
-    write_data_to_csv(stats, filename)
+    write_dict_list_to_csv(stats, filename)
 
     # Display the data in a table
-    display_pretty_table(stats)
+    display_dict_list_as_pretty_table(stats)
 
 def process_and_merge_csv_for_sfp_address():
     """
@@ -193,12 +193,12 @@ def process_and_merge_csv_for_sfp_address():
     if not os.path.exists('OrgDevicePortStats.csv'):
         print("⚠️ OrgDevicePortStats.csv not found. Generating it now...")
         logging.info("OrgDevicePortStats.csv not found. Generating it now...")
-        export_org_device_port_stats()
+        export_device_port_stats_to_csv()
 
     if not os.path.exists('AllDevicesWithSiteInfo.csv'):
         print("⚠️ AllDevicesWithSiteInfo.csv not found. Generating it now...")
         logging.info("AllDevicesWithSiteInfo.csv not found. Generating it now...")
-        export_all_devices_with_site_info()
+        export_devices_with_site_info_to_csv()
 
     # Load site and device info, keyed by MAC address
     with open('AllDevicesWithSiteInfo.csv', mode='r', encoding='utf-8') as file:
@@ -242,7 +242,7 @@ def process_and_merge_csv_for_sfp_address():
 
     print(f"✅ Merged data written to {output_file}")
 
-def get_org_id():
+def get_cached_or_prompted_org_id():
     global org_id
     if org_id:
         logging.info(f"✅ Using org_id from global variable: {org_id}")
@@ -264,7 +264,7 @@ def get_org_id():
     org_id = org_id_list[0]
     return org_id
 
-def flatten_nested_dict(d, parent_key='', sep='_'):
+def flatten_dict_recursively(d, parent_key='', sep='_'):
     """
     Recursively flattens a nested dictionary, joining keys with `sep`.
     Lists of dicts are flattened with indexed keys.
@@ -275,13 +275,13 @@ def flatten_nested_dict(d, parent_key='', sep='_'):
         new_key = f"{parent_key}{sep}{k}" if parent_key else k
         # If the value is a dictionary, recurse
         if isinstance(v, dict):
-            items.extend(flatten_nested_dict(v, new_key, sep=sep).items())
+            items.extend(flatten_dict_recursively(v, new_key, sep=sep).items())
         # If the value is a list
         elif isinstance(v, list):
             if all(isinstance(i, dict) for i in v):
                 # If all items are dicts, flatten each with an index
                 for idx, item in enumerate(v):
-                    items.extend(flatten_nested_dict(item, f"{new_key}{sep}{idx}", sep=sep).items())
+                    items.extend(flatten_dict_recursively(item, f"{new_key}{sep}{idx}", sep=sep).items())
             else:
                 # Otherwise, join list items as a comma-separated string
                 items.append((new_key, ','.join(map(str, v))))
@@ -292,7 +292,7 @@ def flatten_nested_dict(d, parent_key='', sep='_'):
     # logging.debug(f"Flattened dict at key '{parent_key}': {dict(items)}")
     return dict(items)
 
-def flatten_all_nested_fields(data):
+def flatten_nested_fields_in_list(data):
     """
     Flattens all nested fields in a list of dictionaries.
     - Attempts to parse stringified dicts/lists.
@@ -319,14 +319,14 @@ def flatten_all_nested_fields(data):
             # Flatten if it's a dict or list of dicts
             if isinstance(value, dict):
                 # Recursively flatten nested dict
-                flat = flatten_nested_dict(value, parent_key=key)
+                flat = flatten_dict_recursively(value, parent_key=key)
                 new_entry.update(flat)
                 logging.debug(f"Flattened dict for key '{key}': {flat}")
             elif isinstance(value, list):
                 if all(isinstance(i, dict) for i in value):
                     # Flatten each dict in the list with an index
                     for idx, item in enumerate(value):
-                        flat = flatten_nested_dict(item, parent_key=f"{key}_{idx}")
+                        flat = flatten_dict_recursively(item, parent_key=f"{key}_{idx}")
                         new_entry.update(flat)
                         logging.debug(f"Flattened dict in list for key '{key}_{idx}': {flat}")
                 else:
@@ -339,7 +339,7 @@ def flatten_all_nested_fields(data):
         flattened.append(new_entry)
     return flattened
 
-def convert_list_values_to_strings(data):
+def convert_list_values_to_csv_strings(data):
     """
     Converts all list values in a list of dictionaries to comma-separated strings.
     Adds debug logging for each conversion.
@@ -352,7 +352,7 @@ def convert_list_values_to_strings(data):
                 entry[key] = ','.join(map(str, value))
     return data
 
-def get_all_unique_keys(data):
+def get_all_unique_dict_keys(data):
     """
     Returns a sorted list of all unique keys present in a list of dictionaries.
     Useful for determining CSV fieldnames or PrettyTable columns.
@@ -365,7 +365,7 @@ def get_all_unique_keys(data):
     logging.debug(f"Discovered unique keys: {fields}")
     return sorted(fields)
 
-def escape_multiline_strings(data):
+def escape_multiline_strings_for_csv(data):
     """
     Escapes multiline strings in a list of dictionaries for CSV compatibility.
     - Joins list values as comma-separated strings.
@@ -384,7 +384,7 @@ def escape_multiline_strings(data):
                 entry[key] = value.replace('\n', '\\n').replace('\r', '')
     return data
 
-def write_data_to_csv(data, csv_file):
+def write_dict_list_to_csv(data, csv_file):
     """
     Writes a list of dictionaries to a CSV file.
     - Escapes multiline strings for CSV compatibility.
@@ -392,8 +392,8 @@ def write_data_to_csv(data, csv_file):
     - Writes each row, filling missing fields with empty strings.
     """
     logging.debug(f"Preparing to write {len(data)} rows to {csv_file}...")
-    data = escape_multiline_strings(data)
-    fields = get_all_unique_keys(data)
+    data = escape_multiline_strings_for_csv(data)
+    fields = get_all_unique_dict_keys(data)
     logging.debug(f"CSV fields determined: {fields}")
 
     try:
@@ -409,21 +409,21 @@ def write_data_to_csv(data, csv_file):
         logging.error(f"❌ Permission denied when writing to {csv_file}: {e}")
         print(f"❌ Cannot write to {csv_file}. Is it open in another program?")
 
-def fetch_process_and_display_data(title, api_call, filename, sort_key=None, display_fields=None, **kwargs):
+def fetch_and_display_api_data(title, api_call, filename, sort_key=None, display_fields=None, **kwargs):
     """
     Fetches data using the provided API call, processes it (flattening, sorting, escaping),
     writes it to a CSV file, and displays it in a PrettyTable. Adds detailed logging.
     """
     logging.info(f"Starting data fetch: {title}")
     print(title)
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     logging.debug(f"Using org_id: {org_id}")
     smoothed = []
 
     try:
         # Call the API and get all paginated results
         response = api_call(apisession, org_id, **kwargs)
-        smoothed, delay = get_dynamic_delay(smoothed)
+        smoothed, delay = get_rate_limited_delay(smoothed)
         time.sleep(delay)
         rawdata = mistapi.get_all(response=response, mist_session=apisession)
 
@@ -443,19 +443,19 @@ def fetch_process_and_display_data(title, api_call, filename, sort_key=None, dis
             logging.debug(f"Data sorted by key: {sort_key}")
 
         # Flatten nested fields for CSV compatibility
-        data = flatten_all_nested_fields(data)
+        data = flatten_nested_fields_in_list(data)
         logging.debug("Flattened all nested fields.")
 
         # Escape multiline strings for CSV
-        data = escape_multiline_strings(data)
+        data = escape_multiline_strings_for_csv(data)
         logging.debug("Escaped multiline strings.")
 
         # Determine all unique fields for CSV and table display
-        fields = get_all_unique_keys(data)
+        fields = get_all_unique_dict_keys(data)
         logging.debug(f"Unique fields for CSV/table: {fields}")
 
         # Write processed data to CSV
-        write_data_to_csv(data, filename)
+        write_dict_list_to_csv(data, filename)
         logging.info(f"Data written to {filename} ({len(data)} rows).")
 
         # Prepare and display PrettyTable
@@ -470,7 +470,7 @@ def fetch_process_and_display_data(title, api_call, filename, sort_key=None, dis
     except Exception as e:
         logging.error(f"❌ Error during data fetch for {title}: {e}")
 
-def prompt_user_to_select_device_id(site_id, device_type="all", csv_filename="SiteInventory.csv"):
+def prompt_select_device_id_from_inventory(site_id, device_type="all", csv_filename="SiteInventory.csv"):
     """
     Prompts the user to select a device by index or name from the device inventory at a given site.
     Returns the corresponding device ID, or None if not found.
@@ -484,9 +484,9 @@ def prompt_user_to_select_device_id(site_id, device_type="all", csv_filename="Si
 
     # Sort, flatten, and sanitize the inventory data for display and CSV export
     inventory = sorted(rawdata, key=lambda x: x.get("model", ""))
-    inventory = flatten_all_nested_fields(inventory)
-    inventory = escape_multiline_strings(inventory)
-    write_data_to_csv(inventory, csv_filename)
+    inventory = flatten_nested_fields_in_list(inventory)
+    inventory = escape_multiline_strings_for_csv(inventory)
+    write_dict_list_to_csv(inventory, csv_filename)
     logging.info(f"Device inventory for site_id {site_id} written to {csv_filename}")
 
     # Prepare PrettyTable for user selection
@@ -544,13 +544,13 @@ def show_site_device_inventory(site_id, device_type="all", csv_filename="SiteInv
     # Sort inventory by model for easier viewing
     inventory = sorted(rawdata, key=lambda x: x.get("model", ""))
     # Flatten nested fields for CSV and table compatibility
-    inventory = flatten_all_nested_fields(inventory)
+    inventory = flatten_nested_fields_in_list(inventory)
     # Escape multiline strings for CSV compatibility
-    inventory = escape_multiline_strings(inventory)
+    inventory = escape_multiline_strings_for_csv(inventory)
     # Get all unique fields for CSV/table columns
-    fields = get_all_unique_keys(inventory)
+    fields = get_all_unique_dict_keys(inventory)
     # Write inventory to CSV
-    write_data_to_csv(inventory, csv_filename)
+    write_dict_list_to_csv(inventory, csv_filename)
     logging.info(f"Device inventory written to {csv_filename} ({len(inventory)} rows)")
 
     # Prepare PrettyTable for display
@@ -572,13 +572,13 @@ def show_site_device_inventory(site_id, device_type="all", csv_filename="SiteInv
     # Log the table output for reference
     logging.info("\n" + table.get_string())
 
-def prompt_user_to_select_site_id_from_csv(csv_file="SiteList.csv"):
+def prompt_select_site_id_from_csv(csv_file="SiteList.csv"):
     """
     Prompts the user to select a site by index or name from SiteList.csv.
     Returns the corresponding site ID.
     """
     # Ensure the site list CSV is fresh or generate it if missing/stale
-    check_and_generate_csv(csv_file, export_org_site_list)
+    check_and_generate_csv(csv_file, export_all_sites_to_csv)
 
     # Load the site list from CSV
     with open(csv_file, mode='r', encoding='utf-8') as file:
@@ -618,24 +618,24 @@ def prompt_user_to_select_site_id_from_csv(csv_file="SiteList.csv"):
     logging.warning(f"Site not found by name or index: {user_input}")
     return None
 
-def select_site():
+def prompt_and_log_site_selection():
     """
     Prompts the user to select a site from the CSV list and logs the selection.
     """
     logging.info("Prompting user to select a site from SiteList.csv...")
-    site_id = prompt_user_to_select_site_id_from_csv()
+    site_id = prompt_select_site_id_from_csv()
     if site_id:
         logging.info(f"✅ Selected site ID: {site_id}")
         # You can store or use the selected site_id as needed here
     else:
         logging.warning("❌ No site selected. User may have entered an invalid value or cancelled the prompt.")
 
-def search_org_alarms():
+def export_open_org_alarms_to_csv():
     """
     Fetches all open organization alarms from the past 24 hours and writes them to OrgAlarms.csv.
     """
     logging.info("Starting search for all open org alarms in the past 24 hours...")
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Search all Org Alarms:",
         api_call=mistapi.api.v1.orgs.alarms.searchOrgAlarms,
         filename="OrgAlarms.csv",
@@ -643,14 +643,14 @@ def search_org_alarms():
         duration="24h",
         status="open"
     )
-    logging.info("Completed search_org_alarms and wrote results to OrgAlarms.csv.")
+    logging.info("Completed export_open_org_alarms_to_csv and wrote results to OrgAlarms.csv.")
 
-def export_recent_device_events():
+def export_recent_device_events_to_csv():
     """
     Export all device events from the past 24 hours to OrgDeviceEvents.csv.
     """
     logging.info("Search Org Device Events:")
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     # Call the Mist API to search for device events in the last 24 hours
     response = mistapi.api.v1.orgs.devices.searchOrgDeviceEvents(
         apisession, org_id, device_type="all", limit=1000, last_by="-24h"
@@ -660,63 +660,63 @@ def export_recent_device_events():
     events = rawdata
     logging.info(f"Fetched {len(events)} device events from the past 24 hours.")
     # Write the events to a CSV file
-    write_data_to_csv(events, "OrgDeviceEvents.csv")
+    write_dict_list_to_csv(events, "OrgDeviceEvents.csv")
     logging.info(f"Device events written to OrgDeviceEvents.csv ({len(events)} rows).")
     # Optionally log the first few events for debugging
     if events:
         logging.debug("Sample device events: %s", json.dumps(events[:3], indent=2))
 
-def export_org_audit_logs():
+def export_audit_logs_to_csv():
     """
     Export organization audit logs to OrgAuditLogs.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization audit logs...")
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="List Audit Logs:",
         api_call=mistapi.api.v1.orgs.logs.listOrgAuditLogs,
         filename="OrgAuditLogs.csv",
         limit=1000
     )
-    logging.info("Completed export_org_audit_logs and wrote results to OrgAuditLogs.csv.")
+    logging.info("Completed export_audit_logs_to_csv and wrote results to OrgAuditLogs.csv.")
 
-def export_org_site_list():
+def export_all_sites_to_csv():
     """
     Fetches and exports the list of all sites in the organization to SiteList.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization site list...")
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Site List:",
         api_call=mistapi.api.v1.orgs.sites.searchOrgSites,
         filename="SiteList.csv",
         sort_key="name",  # or "site_id" if preferred
         limit=1000
     )
-    logging.info("Completed export_org_site_list and wrote results to SiteList.csv.")
+    logging.info("Completed export_all_sites_to_csv and wrote results to SiteList.csv.")
 
-def export_org_device_inventory():
+def export_device_inventory_to_csv():
     """
     Fetches and exports the full inventory of devices in the organization to OrgInventory.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization device inventory...")
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Org Inventory:",
         api_call=mistapi.api.v1.orgs.inventory.getOrgInventory,
         filename="OrgInventory.csv",
         sort_key="model",
         limit=1000
     )
-    logging.info("Completed export_org_device_inventory and wrote results to OrgInventory.csv.")
+    logging.info("Completed export_device_inventory_to_csv and wrote results to OrgInventory.csv.")
 
-def export_org_device_statistics():
+def export_device_stats_to_csv():
     """
     Export statistics for all devices in the organization to OrgDeviceStats.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization device statistics...")  # Log start
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Org Device Stats:",
         api_call=mistapi.api.v1.orgs.stats.listOrgDevicesStats,
         filename="OrgDeviceStats.csv",
@@ -725,13 +725,13 @@ def export_org_device_statistics():
         limit=1000
     )
 
-def export_org_device_port_stats():
+def export_device_port_stats_to_csv():
     """
     Export port-level statistics for all switches and gateways in the organization to OrgDevicePortStats.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization device port statistics...")  # Log start of function
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Org Device Port Stats:",
         api_call=mistapi.api.v1.orgs.stats.searchOrgSwOrGwPorts,
         filename="OrgDevicePortStats.csv",
@@ -739,13 +739,13 @@ def export_org_device_port_stats():
         limit=1000
     )
 
-def export_org_vpn_peer_stats():
+def export_vpn_peer_stats_to_csv():
     """
     Export VPN peer path statistics for the organization to OrgVPNPeerStats.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of organization VPN peer path statistics...")  # Log start of function
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Org VPN Peer Stats:",
         api_call=mistapi.api.v1.orgs.stats.searchOrgPeerPathStats,
         filename="OrgVPNPeerStats.csv",
@@ -753,74 +753,74 @@ def export_org_vpn_peer_stats():
         limit=1000
     )
 
-def interactive_view_site_inventory():
+def interactive_display_site_inventory():
     """
     Prompts the user to select a site and displays its device inventory.
     """
     logging.info("Prompting user to select a site for device inventory view...")
     print("Select a Site to View Device Inventory:")
-    site_id = prompt_user_to_select_site_id_from_csv()
+    site_id = prompt_select_site_id_from_csv()
     if site_id:
         logging.info(f"User selected site_id: {site_id} for inventory display.")
         show_site_device_inventory(site_id)
     else:
         logging.warning("No site selected or invalid input provided for site selection.")
 
-def interactive_view_device_stats():
+def interactive_display_device_stats():
     """
     Prompts user to select a device and displays its detailed statistics.
     """
     logging.info("Prompting user to select a device for detailed statistics view...")
-    # Call the interactive_device_action helper with the appropriate Mist API function
-    interactive_device_action(
+    # Call the interactive_fetch_device_data_to_csv helper with the appropriate Mist API function
+    interactive_fetch_device_data_to_csv(
         fetch_function=mistapi.api.v1.sites.stats.getSiteDeviceStats,
         filename="DeviceStats.csv",
         description="Fetching detailed stats"
     )
-    logging.info("Completed interactive_view_device_stats execution.")
+    logging.info("Completed interactive_display_device_stats execution.")
 
-def interactive_view_device_tests():
+def interactive_display_device_tests():
     """
     Prompts user to select a gateway device and displays its synthetic test stats.
     """
     logging.info("Prompting user to select a gateway device for synthetic test stats view...")
-    # Call the interactive_device_action helper with the appropriate Mist API function
-    interactive_device_action(
+    # Call the interactive_fetch_device_data_to_csv helper with the appropriate Mist API function
+    interactive_fetch_device_data_to_csv(
         fetch_function=mistapi.api.v1.sites.devices.getSiteDeviceSyntheticTest,
         filename="DeviceTestResults.csv",
         description="Fetching synthetic test stats",
         device_type="gateway"
     )
-    logging.info("Completed interactive_view_device_tests execution.")
+    logging.info("Completed interactive_display_device_tests execution.")
 
-def interactive_view_device_config():
+def interactive_display_device_config():
     """
     Prompts user to select a device and displays its configuration details.
     """
     logging.info("Prompting user to select a device for configuration details view...")  # Log start
-    # Call the interactive_device_action helper with the appropriate Mist API function
-    interactive_device_action(
+    # Call the interactive_fetch_device_data_to_csv helper with the appropriate Mist API function
+    interactive_fetch_device_data_to_csv(
         fetch_function=mistapi.api.v1.sites.devices.getSiteDevice,
         filename="DeviceConfig.csv",
         description="Fetching device configuration"
     )
-    logging.info("Completed interactive_view_device_config execution.")  # Log completion
+    logging.info("Completed interactive_display_device_config execution.")  # Log completion
 
-def export_all_org_devices():
+def export_all_devices_to_csv():
     """
     Fetches and exports a list of all devices in the organization to OrgDevices.csv.
-    Uses fetch_process_and_display_data to handle API call, CSV writing, and table display.
+    Uses fetch_and_display_api_data to handle API call, CSV writing, and table display.
     """
     logging.info("Starting export of all organization devices...")  # Log start of function
-    fetch_process_and_display_data(
+    fetch_and_display_api_data(
         title="Org Devices:",
         api_call=mistapi.api.v1.orgs.devices.listOrgDevices,
         filename="OrgDevices.csv",
         sort_key="type"
     )
-    logging.info("Completed export_all_org_devices and wrote results to OrgDevices.csv.")  # Log completion
+    logging.info("Completed export_all_devices_to_csv and wrote results to OrgDevices.csv.")  # Log completion
 
-def fetch_all_site_settings(apisession, org_id, limit=1000):
+def fetch_all_site_settings_from_api(apisession, org_id, limit=1000):
     """
     Fetches configuration settings for all sites in the organization.
 
@@ -855,30 +855,30 @@ def fetch_all_site_settings(apisession, org_id, limit=1000):
     logging.info(f"Fetched settings for {len(all_configs)} sites.")
     return all_configs
 
-def export_all_site_settings():
+def export_site_settings_to_csv():
     """
     Fetches and exports configuration settings for all sites in the organization to AllSiteConfigs.csv.
     Adds detailed logging at each step.
     """
     logging.info("Starting export of all site configuration settings...")  # Log start
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     logging.debug(f"Using org_id: {org_id} for site settings export.")
 
     # Fetch all site settings using the helper function
-    data = fetch_all_site_settings(apisession, org_id, limit=1000)
+    data = fetch_all_site_settings_from_api(apisession, org_id, limit=1000)
     if data:
         logging.info(f"Fetched settings for {len(data)} sites. Flattening and sanitizing data...")
         # Flatten nested fields for CSV compatibility
-        data = flatten_all_nested_fields(data)
+        data = flatten_nested_fields_in_list(data)
         # Escape multiline strings for CSV compatibility
-        data = escape_multiline_strings(data)
+        data = escape_multiline_strings_for_csv(data)
         # Write the processed data to a CSV file
-        write_data_to_csv(data, "AllSiteConfigs.csv")
+        write_dict_list_to_csv(data, "AllSiteConfigs.csv")
         logging.info("✅ Site configs saved to AllSiteConfigs.csv")
     else:
         logging.warning("⚠️ No site configs found.")
 
-def export_nac_event_definitions():
+def export_nac_event_definitions_to_csv():
     """
     Export NAC (Network Access Control) event definitions to NacEventDefinitions.csv.
     """
@@ -886,20 +886,20 @@ def export_nac_event_definitions():
     print("NAC Event Log Definitions:")
     rawdata = mistapi.api.v1.const.nac_events.listNacEventsDefinitions(apisession).data
     # Write the NAC event definitions to a CSV file
-    write_data_to_csv(rawdata, "NacEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "NacEventDefinitions.csv")
     logging.info("✅ NAC event definitions exported to NacEventDefinitions.csv")  # Log completion
 
-def export_client_event_definitions():
+def export_client_event_definitions_to_csv():
     """
     Export client event log definitions to ClientEventDefinitions.csv.
     """
     logging.info("Exporting client event log definitions...")  # Log start of function
     print("Client Event Log Definitions:")
     rawdata = mistapi.api.v1.const.client_events.listClientEventsDefinitions(apisession).data
-    write_data_to_csv(rawdata, "ClientEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "ClientEventDefinitions.csv")
     logging.info("✅ Client event definitions exported to ClientEventDefinitions.csv")  # Log completion
 
-def export_device_event_definitions():
+def export_device_event_definitions_to_csv():
     """
     Export device event log definitions to DeviceEventDefinitions.csv.
     """
@@ -907,20 +907,20 @@ def export_device_event_definitions():
     print("Device Event Log Definitions:")
     rawdata = mistapi.api.v1.const.device_events.listDeviceEventsDefinitions(apisession).data
     # Write the device event definitions to a CSV file
-    write_data_to_csv(rawdata, "DeviceEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "DeviceEventDefinitions.csv")
     logging.info("✅ Device event definitions exported to DeviceEventDefinitions.csv")  # Log completion
 
-def export_mist_edge_event_definitions():
+def export_mist_edge_event_definitions_to_csv():
     """
     Export Mist Edge event log definitions to MistEdgeEventDefinitions.csv.
     """
     logging.info("Exporting Mist Edge event log definitions...")  # Log start of function
     print("Mist Edge Event Log Definitions:")
     rawdata = mistapi.api.v1.const.mxedge_events.listMxEdgeEventsDefinitions(apisession).data
-    write_data_to_csv(rawdata, "MistEdgeEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "MistEdgeEventDefinitions.csv")
     logging.info("✅ Mist Edge event definitions exported to MistEdgeEventDefinitions.csv")  # Log completion
 
-def export_other_device_event_definitions():
+def export_other_device_event_definitions_to_csv():
     """
     Export other device event log definitions to OtherEventDefinitions.csv.
     """
@@ -929,10 +929,10 @@ def export_other_device_event_definitions():
     # Fetch the other device event definitions using the Mist API
     rawdata = mistapi.api.v1.const.otherdevice_events.listOtherDeviceEventsDefinitions(apisession).data
     # Write the event definitions to a CSV file
-    write_data_to_csv(rawdata, "OtherEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "OtherEventDefinitions.csv")
     logging.info("✅ Other device event definitions exported to OtherEventDefinitions.csv")  # Log completion
 
-def export_system_event_definitions():
+def export_system_event_definitions_to_csv():
     """
     Export system event log definitions to SystemEventDefinitions.csv.
     """
@@ -940,10 +940,10 @@ def export_system_event_definitions():
     print("System Event Log Definitions:")
     rawdata = mistapi.api.v1.const.system_events.listSystemEventsDefinitions(apisession).data
     # Write the system event definitions to a CSV file
-    write_data_to_csv(rawdata, "SystemEventDefinitions.csv")
+    write_dict_list_to_csv(rawdata, "SystemEventDefinitions.csv")
     logging.info("✅ System event definitions exported to SystemEventDefinitions.csv")  # Log completion
 
-def export_alarm_definitions():
+def export_alarm_definitions_to_csv():
     """
     Export alarm log definitions to AlarmDefinitions.csv and display in a PrettyTable.
     Adds logging for each step.
@@ -956,7 +956,7 @@ def export_alarm_definitions():
     # Sort alarm definitions by 'key'
     alarm_defs = sorted(rawdata, key=lambda x: x.get("key", ""))
     # Write alarm definitions to CSV
-    write_data_to_csv(alarm_defs, "AlarmDefinitions.csv")
+    write_dict_list_to_csv(alarm_defs, "AlarmDefinitions.csv")
     logging.info("Alarm definitions written to AlarmDefinitions.csv")
     # Prepare PrettyTable for display
     table = PrettyTable()
@@ -972,20 +972,20 @@ def export_alarm_definitions():
         ])
     logging.info("\n" + table.get_string())  # Log the table output
 
-def export_all_gateway_synthetic_tests():
+def export_gateway_synthetic_tests_to_csv():
     """
     Collects and exports synthetic test stats for all gateways in the organization.
     Iterates through all sites with gateways, fetches synthetic test stats for each gateway device,
     and writes the results to AllGatewaySyntheticTests.csv.
     """
     logging.info("[INFO] Collecting synthetic test stats for all gateways in the org...")
-    org_id = get_org_id()
-    site_ids = get_sites_with_gateways(apisession, org_id)
+    org_id = get_cached_or_prompted_org_id()
+    site_ids = get_site_ids_with_gateway_devices(apisession, org_id)
     all_stats = []
     smoothed = None
 
     if not site_ids:
-        logging.warning("[WARN] No sites with gateways found. Exiting export_all_gateway_synthetic_tests.")
+        logging.warning("[WARN] No sites with gateways found. Exiting export_gateway_synthetic_tests_to_csv.")
         return
 
     for site_id in tqdm(site_ids, desc="Sites", unit="site"):
@@ -1006,7 +1006,7 @@ def export_all_gateway_synthetic_tests():
                     logging.info(f"[INFO] Collected synthetic test stats for device {device_name} ({device_id}) at site {site_id}.")
                 except Exception as e:
                     logging.warning(f"⚠️ Failed to fetch test stats for device {device_id} at site {site_id}: {e}")
-                smoothed, delay = get_dynamic_delay(smoothed)
+                smoothed, delay = get_rate_limited_delay(smoothed)
                 logging.info(f"[INFO] Sleeping for {delay}.")
                 time.sleep(delay)
         except Exception as e:
@@ -1014,14 +1014,14 @@ def export_all_gateway_synthetic_tests():
 
     if all_stats:
         filename = "AllGatewaySyntheticTests.csv"
-        flattened = flatten_all_nested_fields(all_stats)
-        sanitized = escape_multiline_strings(flattened)
-        write_data_to_csv(sanitized, filename)
+        flattened = flatten_nested_fields_in_list(all_stats)
+        sanitized = escape_multiline_strings_for_csv(flattened)
+        write_dict_list_to_csv(sanitized, filename)
         logging.info(f"✅ Synthetic test results saved to {filename} ({len(all_stats)} records).")
     else:
         logging.warning("⚠️ No synthetic test results found. CSV not created.")
 
-def get_sites_with_gateways(apisession, org_id):
+def get_site_ids_with_gateway_devices(apisession, org_id):
     """
     Fetches all sites in the organization that have at least one gateway device.
 
@@ -1044,14 +1044,14 @@ def get_sites_with_gateways(apisession, org_id):
 
     return list(gateway_sites)
 
-def export_all_gateway_test_results_by_site():
+def export_gateway_test_results_by_site_to_csv():
     """
     Export all synthetic test results (including speed tests) for all sites with gateways.
     Fetches test results for each site with at least one gateway device and writes them to a CSV.
     """
     logging.info("[INFO] Searching all test results (including speed tests) for sites with gateways...")
-    org_id = get_org_id()
-    site_ids = get_sites_with_gateways(apisession, org_id)
+    org_id = get_cached_or_prompted_org_id()
+    site_ids = get_site_ids_with_gateway_devices(apisession, org_id)
     all_results = []
     smoothed = None  # Initialize smoothed variable for dynamic delay
 
@@ -1076,7 +1076,7 @@ def export_all_gateway_test_results_by_site():
             for result in results:
                 result["site_id"] = site_id  # Annotate result with site_id
                 all_results.append(result)
-            smoothed, delay = get_dynamic_delay(smoothed)
+            smoothed, delay = get_rate_limited_delay(smoothed)
             time.sleep(delay)
         except Exception as e:
             logging.warning(f"⚠️ Failed to fetch test results for site {site_id}: {e}")
@@ -1084,21 +1084,21 @@ def export_all_gateway_test_results_by_site():
     if all_results:
         filename = "AllGatewayTestResults.csv"
         # Flatten nested fields for CSV compatibility
-        flattened = flatten_all_nested_fields(all_results)
+        flattened = flatten_nested_fields_in_list(all_results)
         # Escape multiline strings for CSV compatibility
-        sanitized = escape_multiline_strings(flattened)
+        sanitized = escape_multiline_strings_for_csv(flattened)
         # Write the processed data to a CSV file
-        write_data_to_csv(sanitized, filename)
+        write_dict_list_to_csv(sanitized, filename)
         logging.info(f"✅ All test results saved to {filename} ({len(all_results)} records).")
     else:
         logging.warning("⚠️ No test results found. CSV not created.")
 
-def export_sites_with_location_info():
+def export_sites_with_location_to_csv():
     """
     Export a list of sites with all available fields to SitesWithLocations.csv.
     """
     logging.info("Listing Sites with Full Info:")
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     logging.debug(f"Using org_id: {org_id} for site location export.")
 
     # Fetch all sites in the organization
@@ -1107,20 +1107,20 @@ def export_sites_with_location_info():
     logging.info(f"Fetched {len(sites)} sites from the organization.")
 
     # Flatten and sanitize all site data
-    flattened_sites = flatten_all_nested_fields(sites)
-    sanitized_sites = escape_multiline_strings(flattened_sites)
+    flattened_sites = flatten_nested_fields_in_list(sites)
+    sanitized_sites = escape_multiline_strings_for_csv(flattened_sites)
 
     # Write to CSV
-    write_data_to_csv(sanitized_sites, "SitesWithLocations.csv")
+    write_dict_list_to_csv(sanitized_sites, "SitesWithLocations.csv")
     logging.info("✅ Full site data written to SitesWithLocations.csv")
 
-def export_gateways_with_site_info():
+def export_gateways_with_site_info_to_csv():
     """
     Fetches all gateway devices in the organization, enriches them with site and address info,
     and exports the result to GatewaysWithSiteInfo.csv. Also logs and displays a summary table.
     """
     logging.info("Fetching Gateways with Site Info...")
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
 
     # Fetch site list and build a lookup dictionary for site info
     site_response = mistapi.api.v1.orgs.sites.listOrgSites(apisession, org_id)
@@ -1174,10 +1174,10 @@ def export_gateways_with_site_info():
     logging.info(f"Enriched {len(gateways)} gateway devices with site info.")
 
     # Flatten nested fields and escape multiline strings for CSV compatibility
-    gateways = flatten_all_nested_fields(gateways)
-    gateways = escape_multiline_strings(gateways)
+    gateways = flatten_nested_fields_in_list(gateways)
+    gateways = escape_multiline_strings_for_csv(gateways)
     gateways = sorted(gateways, key=lambda x: x.get("site_name", ""))
-    write_data_to_csv(gateways, "GatewaysWithSiteInfo.csv")
+    write_dict_list_to_csv(gateways, "GatewaysWithSiteInfo.csv")
     logging.info("Gateway data written to GatewaysWithSiteInfo.csv")
 
     # Display a summary table in logs
@@ -1198,13 +1198,13 @@ def export_gateways_with_site_info():
         ])
     logging.info("\n" + table.get_string())
 
-def export_all_devices_with_site_info():
+def export_devices_with_site_info_to_csv():
     """
     Fetches all devices in the organization, enriches them with site and address info,
     and exports the result to AllDevicesWithSiteInfo.csv. Also logs and displays a summary table.
     """
     logging.info("Fetching All Devices with Site Info...")  # Log start of function
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
 
     # Fetch all sites and build a lookup dictionary for site info
     site_response = mistapi.api.v1.orgs.sites.listOrgSites(apisession, org_id)
@@ -1256,10 +1256,10 @@ def export_all_devices_with_site_info():
         logging.debug(f"Enriched device {device.get('name', '')} ({device.get('mac', '')}) with site info.")
 
     # Flatten nested fields and escape multiline strings for CSV compatibility
-    enriched_devices = flatten_all_nested_fields(enriched_devices)
-    enriched_devices = escape_multiline_strings(enriched_devices)
+    enriched_devices = flatten_nested_fields_in_list(enriched_devices)
+    enriched_devices = escape_multiline_strings_for_csv(enriched_devices)
     enriched_devices = sorted(enriched_devices, key=lambda x: x.get("site_name", ""))
-    write_data_to_csv(enriched_devices, "AllDevicesWithSiteInfo.csv")
+    write_dict_list_to_csv(enriched_devices, "AllDevicesWithSiteInfo.csv")
     logging.info(f"All device data written to AllDevicesWithSiteInfo.csv ({len(enriched_devices)} records).")
 
     # Display a summary table in logs
@@ -1286,13 +1286,13 @@ def generate_support_package():
 
     # List of required CSV files and their generation functions
     required_files = [
-        ("OrgAlarms.csv", search_org_alarms),
-        ("OrgDeviceEvents.csv", export_recent_device_events),
-        ("SiteList.csv", export_org_site_list),
-        ("OrgDevices.csv", export_all_org_devices),
-        ("OrgDeviceStats.csv", export_org_device_statistics),
-        ("OrgDevicePortStats.csv", export_org_device_port_stats),
-        ("AllGatewayTestResults.csv", export_all_gateway_test_results_by_site),
+        ("OrgAlarms.csv", export_open_org_alarms_to_csv),
+        ("OrgDeviceEvents.csv", export_recent_device_events_to_csv),
+        ("SiteList.csv", export_all_sites_to_csv),
+        ("OrgDevices.csv", export_all_devices_to_csv),
+        ("OrgDeviceStats.csv", export_device_stats_to_csv),
+        ("OrgDevicePortStats.csv", export_device_port_stats_to_csv),
+        ("AllGatewayTestResults.csv", export_gateway_test_results_by_site_to_csv),
     ]
 
     # Ensure all required files are fresh or regenerate them
@@ -1301,21 +1301,21 @@ def generate_support_package():
         check_and_generate_csv(filename, func, freshness_minutes=15)
 
     # Ensure SiteList.csv is generated before loading
-    check_and_generate_csv('SiteList.csv', export_org_site_list, freshness_minutes=15)
+    check_and_generate_csv('SiteList.csv', export_all_sites_to_csv, freshness_minutes=15)
 
     # Load the pulled data into dictionaries
     logging.debug("Loading CSV data into dictionaries for support package assembly...")
-    site_data = load_csv_into_dict('SiteList.csv', 'id')
-    alarms_data = load_csv_into_dict('OrgAlarms.csv', 'site_id')
-    events_data = load_csv_into_dict('OrgDeviceEvents.csv', 'site_id')
-    devices_data = load_csv_into_dict('OrgDevices.csv', 'name')
-    device_stats_data = load_csv_into_dict('OrgDeviceStats.csv', 'site_id')
-    port_stats_data = load_csv_into_dict('OrgDevicePortStats.csv', 'site_id')
+    site_data = load_csv_grouped_by_key('SiteList.csv', 'id')
+    alarms_data = load_csv_grouped_by_key('OrgAlarms.csv', 'site_id')
+    events_data = load_csv_grouped_by_key('OrgDeviceEvents.csv', 'site_id')
+    devices_data = load_csv_grouped_by_key('OrgDevices.csv', 'name')
+    device_stats_data = load_csv_grouped_by_key('OrgDeviceStats.csv', 'site_id')
+    port_stats_data = load_csv_grouped_by_key('OrgDevicePortStats.csv', 'site_id')
 
     # Load speedtest data if available
     if os.path.exists('AllGatewayTestResults.csv'):
         logging.debug("Loading AllGatewayTestResults.csv for speedtest data...")
-        speedtest_data = load_csv_into_dict('AllGatewayTestResults.csv', 'site_id')
+        speedtest_data = load_csv_grouped_by_key('AllGatewayTestResults.csv', 'site_id')
     else:
         logging.warning("⚠️ AllGatewayTestResults.csv not found. Skipping speedtest data.")
         speedtest_data = {}
@@ -1340,13 +1340,13 @@ def generate_support_package():
 
         support_package_filename = f"SupportPackage_{site_id}.csv"
         logging.debug(f"Writing support package to {support_package_filename}...")
-        write_support_package_to_csv(support_data, support_package_filename)
+        write_support_data_to_csv(support_data, support_package_filename)
         logging.info(f"Support package written for site {site_id}.")
 
     logging.info("✅ Support packages generated for applicable sites.")
     logging.info("✅ Support packages generated for all sites!")
 
-def load_csv_into_dict(filename, key):
+def load_csv_grouped_by_key(filename, key):
     """
     Loads CSV data into a dictionary keyed by the specified column.
     Each key maps to a list of rows (as dictionaries) that share the same key value.
@@ -1369,7 +1369,7 @@ def load_csv_into_dict(filename, key):
         logging.info(f"Loaded {row_count} rows from '{filename}'. Found {len(data_dict)} unique keys for '{key}'.")
     return data_dict  # Return the dictionary
 
-def write_support_package_to_csv(data, filename):
+def write_support_data_to_csv(data, filename):
     """
     Writes the support package data (a dict of lists of dicts) to a CSV file.
     Each section in 'data' is a list of dictionaries. All unique keys across all sections are used as CSV columns.
@@ -1405,7 +1405,7 @@ def poll_marvis_actions():
     """
     logging.info("🔍 Polling Marvis Actions...")
     print("🔍 Polling Marvis Actions...")
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     logging.debug(f"Using org_id: {org_id} for Marvis actions polling.")
 
     # Call the Mist API to get Marvis actions
@@ -1418,21 +1418,21 @@ def poll_marvis_actions():
     logging.info(f"Filtered {len(open_actions)} open Marvis actions.")
 
     # Flatten and clean the data for CSV compatibility
-    data = flatten_all_nested_fields(open_actions)
-    data = escape_multiline_strings(data)
+    data = flatten_nested_fields_in_list(open_actions)
+    data = escape_multiline_strings_for_csv(data)
     logging.debug("Flattened and sanitized open Marvis actions for CSV.")
 
     # Write to CSV
-    write_data_to_csv(data, "OpenMarvisActions.csv")
+    write_dict_list_to_csv(data, "OpenMarvisActions.csv")
     logging.info(f"✅ {len(open_actions)} open Marvis actions written to OpenMarvisActions.csv")
     print(f"✅ {len(open_actions)} open Marvis actions written to OpenMarvisActions.csv")
 
-def export_current_guests():
+def export_current_guest_users_to_csv():
     """
     Export all current guest users in the org to OrgCurrentGuests.csv
     """
     logging.info("Exporting all current guest users in the org...")  # Log start of function
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     logging.debug(f"Using org_id: {org_id} for current guest export.")
 
     # Call the Mist API to get current guest authorizations
@@ -1441,20 +1441,20 @@ def export_current_guests():
     logging.info(f"Fetched {len(guests)} current guest users from API.")
 
     # Flatten nested fields for CSV compatibility
-    guests = flatten_all_nested_fields(guests)
+    guests = flatten_nested_fields_in_list(guests)
     # Escape multiline strings for CSV compatibility
-    guests = escape_multiline_strings(guests)
+    guests = escape_multiline_strings_for_csv(guests)
 
     # Write the processed data to a CSV file
-    write_data_to_csv(guests, "OrgCurrentGuests.csv")
+    write_dict_list_to_csv(guests, "OrgCurrentGuests.csv")
     logging.info("✅ Current guests exported to OrgCurrentGuests.csv")  # Log completion
 
-def export_historical_guests():
+def export_historical_guest_users_to_csv():
     """
     Export all guest users from the last 7 days to OrgHistoricalGuests.csv
     """
     logging.info("Exporting all guest users from the last 7 days...")  # Log start of function
-    org_id = get_org_id()
+    org_id = get_cached_or_prompted_org_id()
     # Calculate epoch for 7 days ago
     end_time = int(time.time())
     start_time = end_time - 7 * 24 * 3600
@@ -1466,21 +1466,21 @@ def export_historical_guests():
     guests = mistapi.get_all(response=response, mist_session=apisession)
     logging.info(f"Fetched {len(guests)} historical guest users from API.")
     # Flatten nested fields for CSV compatibility
-    guests = flatten_all_nested_fields(guests)
+    guests = flatten_nested_fields_in_list(guests)
     # Escape multiline strings for CSV compatibility
-    guests = escape_multiline_strings(guests)
+    guests = escape_multiline_strings_for_csv(guests)
     # Write the processed data to a CSV file
-    write_data_to_csv(guests, "OrgHistoricalGuests.csv")
+    write_dict_list_to_csv(guests, "OrgHistoricalGuests.csv")
     logging.info("✅ Historical guests exported to OrgHistoricalGuests.csv")  # Log completion
 
-def export_all_switch_vc_stats():
+def export_switch_vc_stats_to_csv():
     """
     Export virtual chassis stats (including stacking cable info) for all switches in the org.
     """
     logging.info("Exporting all switch virtual chassis stats...")
 
     # Ensure OrgInventory.csv is fresh
-    check_and_generate_csv("OrgInventory.csv", export_org_device_inventory, freshness_minutes=15)
+    check_and_generate_csv("OrgInventory.csv", export_device_inventory_to_csv, freshness_minutes=15)
 
     # Load OrgInventory.csv and filter for switches
     with open("OrgInventory.csv", mode="r", encoding="utf-8") as file:
@@ -1520,9 +1520,9 @@ def export_all_switch_vc_stats():
 
     # Flatten and write to CSV
     logging.info(f"Flattening and sanitizing {len(all_vc_stats)} VC stats entries for CSV export.")
-    all_vc_stats = flatten_all_nested_fields(all_vc_stats)
-    all_vc_stats = escape_multiline_strings(all_vc_stats)
-    write_data_to_csv(all_vc_stats, "OrgSwitchVCStats.csv")
+    all_vc_stats = flatten_nested_fields_in_list(all_vc_stats)
+    all_vc_stats = escape_multiline_strings_for_csv(all_vc_stats)
+    write_dict_list_to_csv(all_vc_stats, "OrgSwitchVCStats.csv")
     logging.info(f"✅ Switch VC stats exported to OrgSwitchVCStats.csv ({len(all_vc_stats)} records).")
     # Optionally log a preview of the data
     if all_vc_stats:
@@ -1535,18 +1535,18 @@ def export_all_switch_vc_stats():
             table.add_row([row.get(f, "") for f in table.field_names])
         logging.info("\n" + table.get_string())
 
-def select_site_and_device(site_id=None, device_id=None):
+def prompt_select_site_and_device_ids(site_id=None, device_id=None):
     """
     Returns site_id and device_id, either from arguments or via interactive prompts.
     """
     if not site_id:
-        site_id = prompt_user_to_select_site_id_from_csv()
+        site_id = prompt_select_site_id_from_csv()
         if not site_id:
             print("❌ No site selected.")
             return None, None
 
     if not device_id:
-        device_id = prompt_user_to_select_device_id(site_id, device_type=device_type)
+        device_id = prompt_select_device_id_from_inventory(site_id, device_type=device_type)
         if not device_id:
             print("❌ No device selected.")
             return None, None
@@ -1650,7 +1650,7 @@ def run_interactive_shell(shell_url, debug=False):
     listen_keyboard(on_release=_ws_out, delay_second_char=0, delay_other_chars=0, lower=False)
 
 def launch_cli_shell(site_id=None, device_id=None, debug=False):
-    site_id, device_id = select_site_and_device(site_id, device_id)
+    site_id, device_id = prompt_select_site_and_device_ids(site_id, device_id)
     if not site_id or not device_id:
         return
     shell_url = create_shell_session(site_id, device_id)
@@ -1827,7 +1827,7 @@ def trigger_arp_command(mist_host, mist_apitoken, site_id, device_id):
 
 def run_arp_via_websocket(site_id=None, device_id=None):
     if not site_id or not device_id:
-        site_id, device_id = select_site_and_device(site_id, device_id)
+        site_id, device_id = prompt_select_site_and_device_ids(site_id, device_id)
     if not site_id or not device_id:
         return
 
@@ -1852,7 +1852,7 @@ def loop_refresh_core_datasets(delay=None, debug=False):
     """
     logging.info("🔁 Starting continuous data refresh loop...")
     smoothed = None  # Initialize smoothed delay tracker
-    get_org_id()  # Ensure org_id is loaded from .env if not already
+    get_cached_or_prompted_org_id()  # Ensure org_id is loaded from .env if not already
 
     try:
         while True:
@@ -1860,18 +1860,18 @@ def loop_refresh_core_datasets(delay=None, debug=False):
                 logging.info("🛑 Stop signal detected (stop_loop.txt). Exiting loop.")
                 break
 
-            export_org_site_list()
-            export_org_device_inventory()
-            export_org_device_statistics()
-            export_org_device_port_stats()
-            export_org_vpn_peer_stats()
+            export_all_sites_to_csv()
+            export_device_inventory_to_csv()
+            export_device_stats_to_csv()
+            export_device_port_stats_to_csv()
+            export_vpn_peer_stats_to_csv()
             logging.info("✅ All datasets refreshed.")
 
             # Determine delay
             if delay is not None:
                 actual_delay = delay
             else:
-                smoothed, actual_delay = get_dynamic_delay(smoothed)
+                smoothed, actual_delay = get_rate_limited_delay(smoothed)
 
             logging.info(f"⏳ Sleeping for {actual_delay:.2f} seconds...")
             time.sleep(actual_delay)
@@ -1879,7 +1879,7 @@ def loop_refresh_core_datasets(delay=None, debug=False):
     except KeyboardInterrupt:
         logging.info("🛑 Loop interrupted by user (Ctrl+C). Exiting gracefully.")
 
-def load_tuning_data():
+def load_pid_tuning_data():
     if os.path.exists(tuning_data_file):
         try:
             with open(tuning_data_file, 'r') as f:
@@ -1888,7 +1888,7 @@ def load_tuning_data():
             logging.warning(f"⚠️ Failed to parse tuning_data.json: {e}. Using defaults.")
     return {"k_p": 0.1, "k_i": 0.0005, "error": [], "integral": 0.0}
 
-def save_tuning_data(data):
+def save_pid_tuning_data(data):
     with open(tuning_data_file, 'w') as f:
         json.dump(data, f, indent=2)
 
@@ -1931,7 +1931,7 @@ def compute_dynamic_alpha(errors, min_alpha=0.1, max_alpha=0.9):
     and saves the output to ws.log.
     """
     logging.info("Launching shell to run 'show route 0.0.0.0'...")
-    site_id, device_id = select_site_and_device()
+    site_id, device_id = prompt_select_site_and_device_ids()
     if not site_id or not device_id:
         return
 
@@ -1971,7 +1971,7 @@ def show_dhcp_security_binding():
     Saves output to ws_dhcp.log.
     """
     logging.info("Launching shell to run 'show dhcp-security binding'...")
-    site_id, device_id = select_site_and_device()
+    site_id, device_id = prompt_select_site_and_device_ids()
     if not site_id or not device_id:
         return
 
@@ -2011,7 +2011,7 @@ def show_vlans():
     Saves output to ws_vlans.log.
     """
     logging.info("Launching shell to run 'show vlans'...")
-    site_id, device_id = select_site_and_device()
+    site_id, device_id = prompt_select_site_and_device_ids()
     if not site_id or not device_id:
         return
 
@@ -2047,7 +2047,7 @@ def show_vlans():
 
 def run_shell_command_and_log(command, log_filename, csv_output=None, description="Running shell command"):
     logging.info(f"Launching shell to run: {description}")
-    site_id, device_id = select_site_and_device()
+    site_id, device_id = prompt_select_site_and_device_ids()
     if not site_id or not device_id:
         return
 
@@ -2078,12 +2078,12 @@ def run_shell_command_and_log(command, log_filename, csv_output=None, descriptio
         print(f"✅ Output saved to {log_filename}")
 
         if csv_output:
-            clean_ws_log_to_csv(log_file=log_filename, output_csv=csv_output)
+            extract_json_from_ws_log_to_csv(log_file=log_filename, output_csv=csv_output)
 
     except Exception as e:
         print(f"❌ Error during shell session: {e}")
 
-def clean_ws_log_to_csv(log_file, output_csv):
+def extract_json_from_ws_log_to_csv(log_file, output_csv):
     """
     Cleans a WebSocket log file, extracts the first valid JSON object,
     and writes it to a CSV file.
@@ -2118,14 +2118,14 @@ def clean_ws_log_to_csv(log_file, output_csv):
             return
 
         # Flatten and write to CSV
-        flattened = flatten_all_nested_fields([json_data])
-        write_data_to_csv(flattened, output_csv)
+        flattened = flatten_nested_fields_in_list([json_data])
+        write_dict_list_to_csv(flattened, output_csv)
         print(f"✅ Extracted JSON written to {output_csv}")
 
     except Exception as e:
         print(f"❌ Failed to clean {log_file}: {e}")
 
-def append_delay_metrics_to_json(delay_metrics, api_cache, tuning_data, filename="delay_metrics.json"):
+def append_delay_metrics_log(delay_metrics, api_cache, tuning_data, filename="delay_metrics.json"):
     """
     Appends delay metrics, API cache, and tuning data to a JSON file.
     Each call writes a new line with a timestamped entry.
@@ -2143,24 +2143,24 @@ def append_delay_metrics_to_json(delay_metrics, api_cache, tuning_data, filename
     except Exception as e:
         logging.warning(f"⚠️ Failed to write delay metrics to {filename}: {e}")
 
-def export_all_gateway_device_configs(debug=False, fast=False):
+def export_gateway_device_configs_to_csv(debug=False, fast=False):
     """
     Fetches and exports configuration details for all gateway devices across all sites in the organization
     to AllSiteGatewayConfigs.csv. Also generates a filtered CSV with selected fields and port info.
     """
     logging.info("Starting export of all gateway device configurations...")
-    org_id = get_org_id()
-    data = fetch_all_gateway_device_configs(apisession, org_id, fast=fast)
+    org_id = get_cached_or_prompted_org_id()
+    data = fetch_gateway_device_configs_from_api(apisession, org_id, fast=fast)
     if not data:
         logging.warning("⚠️ No device configs found.")
         return
 
     # Flatten and sanitize the data
-    flattened = flatten_all_nested_fields(data)
-    sanitized = escape_multiline_strings(flattened)
+    flattened = flatten_nested_fields_in_list(data)
+    sanitized = escape_multiline_strings_for_csv(flattened)
 
     # Write full dataset to CSV
-    write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
+    write_dict_list_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
     logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
 
     # Identify port config columns (excluding _vpn_paths_)
@@ -2186,10 +2186,11 @@ def export_all_gateway_device_configs(debug=False, fast=False):
     else:
         if debug:
             logging.debug(f"Sample filtered row: {filtered_rows[0]}")
-        write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
+        write_dict_list_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
         logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
 
-def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers=None):
+
+def fetch_gateway_device_configs_from_api(apisession, org_id, fast=False, max_workers=None):
     """
     Fetches configuration details for all gateway devices in the org using org inventory.
     If `fast` is True, fetches each device config concurrently using a thread per device.
@@ -2259,7 +2260,7 @@ def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers
         logging.info("🐢 Fast mode disabled: using sequential rate-limited execution.")
         smoothed = None
         for site_id, device_id, site_name in tqdm(work_items, desc="Fetching Configs", unit="device"):
-            smoothed, delay = get_dynamic_delay(smoothed)
+            smoothed, delay = get_rate_limited_delay(smoothed)
             logging.info(f"[INFO] Sleeping for {delay:.2f} seconds.")
             time.sleep(delay)
             result = fetch_config(site_id, device_id, site_name)
@@ -2269,9 +2270,9 @@ def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers
     logging.info(f"✅ Completed fetching {len(all_device_configs)} gateway device configs.")
     return all_device_configs
 
-def get_dynamic_delay(smoothed_delay=None):
+def get_rate_limited_delay(smoothed_delay=None):
     global _api_usage_cache
-    tuning_data = load_tuning_data()
+    tuning_data = load_pid_tuning_data()
 
     # Reset gains if out of bounds
     if tuning_data["k_p"] < 1e-6 or tuning_data["k_i"] < 1e-8 or tuning_data["k_p"] > 1.0 or tuning_data["k_i"] > 0.01:
@@ -2350,7 +2351,7 @@ def get_dynamic_delay(smoothed_delay=None):
         tuning_data["integral"] = delay_integral
         tuning_data["back_calc_gain"] = back_calc_gain
         adjust_gains(tuning_data)
-        save_tuning_data(tuning_data)
+        save_pid_tuning_data(tuning_data)
 
         delay_metrics = {
             "used": used,
@@ -2361,7 +2362,7 @@ def get_dynamic_delay(smoothed_delay=None):
             "final_delay": delay_in_seconds,
             "alpha": alpha
         }
-        append_delay_metrics_to_json(delay_metrics, _api_usage_cache, tuning_data)
+        append_delay_metrics_log(delay_metrics, _api_usage_cache, tuning_data)
 
         return smoothed_delay, delay_in_seconds
 
@@ -2371,49 +2372,49 @@ def get_dynamic_delay(smoothed_delay=None):
 
 menu_actions = {
     # 🗂️ Setup & Core Logs
-    "0": (select_site, "Select a site (used by other functions)"),
-    "1": (search_org_alarms, "Export all organization alarms from the past day"),
-    "2": (export_recent_device_events, "Export all device events from the past 24 hours"),
-    "3": (export_org_audit_logs, "Export audit logs for the organization"),
+    "0": (prompt_and_log_site_selection, "Select a site (used by other functions)"),
+    "1": (export_open_org_alarms_to_csv, "Export all organization alarms from the past day"),
+    "2": (export_recent_device_events_to_csv, "Export all device events from the past 24 hours"),
+    "3": (export_audit_logs_to_csv, "Export audit logs for the organization"),
 
     # 📚 Event & Alarm Definitions
-    "4": (export_nac_event_definitions, "Export NAC (Network Access Control) event definitions"),
-    "5": (export_client_event_definitions, "Export client event definitions"),
-    "6": (export_device_event_definitions, "Export device event definitions"),
-    "7": (export_mist_edge_event_definitions, "Export Mist Edge event definitions"),
-    "8": (export_other_device_event_definitions, "Export other device event definitions"),
-    "9": (export_system_event_definitions, "Export system event definitions"),
-    "10": (export_alarm_definitions, "Export alarm definitions with severity and field info"),
+    "4": (export_nac_event_definitions_to_csv, "Export NAC (Network Access Control) event definitions"),
+    "5": (export_client_event_definitions_to_csv, "Export client event definitions"),
+    "6": (export_device_event_definitions_to_csv, "Export device event definitions"),
+    "7": (export_mist_edge_event_definitions_to_csv, "Export Mist Edge event definitions"),
+    "8": (export_other_device_event_definitions_to_csv, "Export other device event definitions"),
+    "9": (export_system_event_definitions_to_csv, "Export system event definitions"),
+    "10": (export_alarm_definitions_to_csv, "Export alarm definitions with severity and field info"),
 
     # 🏢 Organization-Level Exports
-    "11": (export_org_site_list, "Export a list of all sites in the organization"),
-    "12": (export_org_device_inventory, "Export the full inventory of devices in the organization"),
-    "13": (export_org_device_statistics, "Export statistics for all devices in the organization"),
-    "14": (export_org_device_port_stats, "Export port-level statistics for switches and gateways"),
-    "15": (export_org_vpn_peer_stats, "Export VPN peer path statistics for the organization"),
+    "11": (export_all_sites_to_csv, "Export a list of all sites in the organization"),
+    "12": (export_device_inventory_to_csv, "Export the full inventory of devices in the organization"),
+    "13": (export_device_stats_to_csv, "Export statistics for all devices in the organization"),
+    "14": (export_device_port_stats_to_csv, "Export port-level statistics for switches and gateways"),
+    "15": (export_vpn_peer_stats_to_csv, "Export VPN peer path statistics for the organization"),
 
     # 🧭 Interactive Site/Device Exploration
-    "16": (interactive_view_site_inventory, "View device inventory for a selected site"),
-    "17": (interactive_view_device_stats, "View statistics for a selected device at a site"),
-    "18": (interactive_view_device_tests, "View synthetic test stats for a selected gateway device"),
-    "19": (interactive_view_device_config, "View configuration details for a selected device"),
+    "16": (interactive_display_site_inventory, "View device inventory for a selected site"),
+    "17": (interactive_display_device_stats, "View statistics for a selected device at a site"),
+    "18": (interactive_display_device_tests, "View synthetic test stats for a selected gateway device"),
+    "19": (interactive_display_device_config, "View configuration details for a selected device"),
 
     # 🌐 Gateway & Site-Wide Exports
-    "20": (export_all_gateway_synthetic_tests, "Export synthetic test results for all gateways"),
-    "21": (export_all_org_devices, "Export a list of all devices in the organization"),
-    "22": (export_all_site_settings, "Export configuration settings for all sites"),
-    "23": (export_all_gateway_device_configs, "WIP Export configuration details for all gateway devices across all sites"),
-    "24": (export_all_gateway_test_results_by_site, "Export all synthetic test results (including speed tests) for gateways"),
+    "20": (export_gateway_synthetic_tests_to_csv, "Export synthetic test results for all gateways"),
+    "21": (export_all_devices_to_csv, "Export a list of all devices in the organization"),
+    "22": (export_site_settings_to_csv, "Export configuration settings for all sites"),
+    "23": (export_gateway_device_configs_to_csv, "WIP Export configuration details for all gateway devices across all sites"),
+    "24": (export_gateway_test_results_by_site_to_csv, "Export all synthetic test results (including speed tests) for gateways"),
 
     # 🗺️ Location-Enriched Exports
-    "25": (export_sites_with_location_info, "Export a list of sites with location and timezone info"),
-    "26": (export_gateways_with_site_info, "Export a list of gateways with associated site and address info"),
-    "27": (export_all_devices_with_site_info, "Export a list of all devices with associated site and address info"),
+    "25": (export_sites_with_location_to_csv, "Export a list of sites with location and timezone info"),
+    "26": (export_gateways_with_site_info_to_csv, "Export a list of gateways with associated site and address info"),
+    "27": (export_devices_with_site_info_to_csv, "Export a list of all devices with associated site and address info"),
     "28": (process_and_merge_csv_for_sfp_address, "Process and merge CSV files of SFP Module locations into a single CSV file"),
     "29": (generate_support_package, "Generate support package for each site"),
     "30": (poll_marvis_actions, "Poll Marvis actions and export open actions to CSV"),
-    "31": (lambda: (export_current_guests(), export_historical_guests()),"Export all current guest users and last 7 days of historical guests to CSV"),
-    "32": (export_all_switch_vc_stats, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
+    "31": (lambda: (export_current_guest_users_to_csv(), export_historical_guest_users_to_csv()),"Export all current guest users and last 7 days of historical guests to CSV"),
+    "32": (export_switch_vc_stats_to_csv, "Export all switch virtual chassis (VC/stacking) stats to CSV"),
     "33": (launch_cli_shell, "Interactively execute a CLI command on a gateway or switch (exit with ~)"),
     "34": (run_arp_via_websocket, "Run ARP command on an AP and receive output via WebSocket"),
     "35": (lambda debug=False: loop_refresh_core_datasets(delay=None, debug=debug), "Loop refresh of core datasets (site list, inventory, stats, ports, VPN) Stop with CTRL+C or create 'stop_loop.txt'"),
@@ -2442,7 +2443,7 @@ def main():
             org_id = args.org
             logging.info(f"Overriding org_id with CLI argument: {org_id}")
         else:
-            org_id = get_org_id()
+            org_id = get_cached_or_prompted_org_id()
 
         site_id = None
         if args.site:
