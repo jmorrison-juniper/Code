@@ -2375,11 +2375,7 @@ def export_combined_inventory_with_site_info():
     grouped by calendar week based on 'created_time' field.
     Also generates a summary report with device counts per week.
     """
-    import csv
-    import os
-    from datetime import datetime, timezone
     from collections import defaultdict
-    from dotenv import load_dotenv
 
     # Load environment variables
     load_dotenv()
