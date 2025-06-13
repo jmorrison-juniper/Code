@@ -41,6 +41,7 @@ from sshkeyboard import listen_keyboard, stop_listening
 from dotenv import load_dotenv
 import numpy as np
 from logging.handlers import RotatingFileHandler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 log_handler = RotatingFileHandler(
     filename='script.log',
@@ -2154,22 +2155,30 @@ def export_all_gateway_device_configs(debug=False, fast=False):
         logging.warning("⚠️ No device configs found.")
         return
 
+    # Flatten and sanitize the data
     flattened = flatten_all_nested_fields(data)
     sanitized = escape_multiline_strings(flattened)
+
+    # Write full dataset to CSV
     write_data_to_csv(sanitized, "AllSiteGatewayConfigs.csv")
     logging.info("✅ Device configs saved to AllSiteGatewayConfigs.csv")
 
+    # Identify port config columns (excluding _vpn_paths_)
     base_columns = ["mac", "name"]
     port_columns = [
         col for col in sanitized[0].keys()
         if re.match(r"(?i)port_config_ge-0/0/\d+_.*", col) and "_vpn_paths_" not in col
     ]
     columns_to_keep = base_columns + port_columns
+
+    # Filter rows where any port column has non-empty value
     filtered_rows = [
         {col: row.get(col, "") for col in columns_to_keep}
         for row in sanitized
         if any(row.get(col) not in [None, "", "null"] for col in port_columns)
     ]
+
+    # Write filtered dataset to CSV
     if not filtered_rows:
         logging.warning("⚠️ No rows matched the port config filter. FilteredGatewayPortConfigs.csv will be empty.")
         with open("FilteredGatewayPortConfigs.csv", "w", newline="", encoding="utf-8") as f:
@@ -2179,9 +2188,6 @@ def export_all_gateway_device_configs(debug=False, fast=False):
             logging.debug(f"Sample filtered row: {filtered_rows[0]}")
         write_data_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
         logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
 
 def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers=None):
     """
@@ -2262,7 +2268,6 @@ def fetch_all_gateway_device_configs(apisession, org_id, fast=False, max_workers
 
     logging.info(f"✅ Completed fetching {len(all_device_configs)} gateway device configs.")
     return all_device_configs
-
 
 def get_dynamic_delay(smoothed_delay=None):
     global _api_usage_cache
@@ -2504,7 +2509,6 @@ def main():
         logging.warning(f"Invalid selection '{iwant}' entered by user.")
         print("Invalid selection. Please try again.")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
