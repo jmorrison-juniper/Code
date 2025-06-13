@@ -2189,7 +2189,6 @@ def export_gateway_device_configs_to_csv(debug=False, fast=False):
         write_dict_list_to_csv(filtered_rows, "FilteredGatewayPortConfigs.csv")
         logging.info("✅ Filtered gateway port configs saved to FilteredGatewayPortConfigs.csv")
 
-
 def fetch_gateway_device_configs_from_api(apisession, org_id, fast=False, max_workers=None):
     """
     Fetches configuration details for all gateway devices in the org using org inventory.
@@ -2370,6 +2369,89 @@ def get_rate_limited_delay(smoothed_delay=None):
         logging.warning(f"⚠️ Failed to calculate dynamic delay: {e}. Using default 500 ms delay.")
         return smoothed_delay, 0.5
 
+def export_combined_inventory_with_site_info():
+    """
+    Combines fresh AllDevicesWithSiteInfo data into multiple CSV files
+    grouped by calendar week based on 'created_time' field.
+    Also generates a summary report with device counts per week.
+    """
+    import csv
+    import os
+    from datetime import datetime, timezone
+    from collections import defaultdict
+    from dotenv import load_dotenv
+
+    # Load environment variables
+    load_dotenv()
+    END_CUSTOMER_NAME = os.getenv("END_CUSTOMER_NAME")
+    END_CUSTOMER_ACCOUNT_ID = os.getenv("END_CUSTOMER_ACCOUNT_ID")
+
+    # Always regenerate fresh data
+    export_devices_with_site_info_to_csv()
+
+    # Load the enriched device + site info
+    with open("AllDevicesWithSiteInfo.csv", mode="r", encoding="utf-8") as f:
+        site_configs = list(csv.DictReader(f))
+
+    # Create a subfolder for weekly CSV files
+    output_folder = "CombinedInventory_ByWeek"
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Initialize data structures for weekly grouping and summary
+    weekly_data = defaultdict(list)
+    summary_data = defaultdict(int)
+
+    # Process each device entry
+    for device in site_configs:
+        try:
+            created_time = int(device.get("created_time", 0))
+            created_date = datetime.fromtimestamp(created_time, tz=timezone.utc)
+            year, week, _ = created_date.isocalendar()
+            week_key = f"{year}_Week_{week:02d}"
+
+            weekly_data[week_key].append({
+                "Full Site": device.get("site_name", ""),
+                "System Serial Number": device.get("serial", ""),
+                "System Model Number": device.get("model", ""),
+                "End Customer Name": END_CUSTOMER_NAME,
+                "Address Line 1": device.get("street", ""),
+                "Address Line 2": "",
+                "City": device.get("city", ""),
+                "State": device.get("state", ""),
+                "Country": device.get("country", "US"),
+                "Zip Code / Postal Code": device.get("zip_code", ""),
+                "End Customer Account ID": END_CUSTOMER_ACCOUNT_ID
+            })
+
+            summary_data[(year, week)] += 1
+        except Exception as e:
+            logging.warning(f"⚠️ Skipping device due to error: {e}")
+
+    # Define output CSV columns
+    fieldnames = [
+        "Full Site", "System Serial Number", "System Model Number", "End Customer Name",
+        "Address Line 1", "Address Line 2", "City", "State", "Country",
+        "Zip Code / Postal Code", "End Customer Account ID"
+    ]
+
+    # Write weekly CSV files
+    for week_key, rows in weekly_data.items():
+        output_file = os.path.join(output_folder, f"{week_key}.csv")
+        with open(output_file, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    # Write summary report
+    summary_file = os.path.join(output_folder, "CombinedInventory_Summary.csv")
+    with open(summary_file, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Year", "Week", "Device Count"])
+        for (year, week), count in sorted(summary_data.items()):
+            writer.writerow([year, week, count])
+
+    print("✅ CombinedInventory_ByWeek folder and summary report have been generated.")
+
 menu_actions = {
     # 🗂️ Setup & Core Logs
     "0": (prompt_and_log_site_selection, "Select a site (used by other functions)"),
@@ -2421,6 +2503,7 @@ menu_actions = {
     "38": (lambda: run_shell_command_and_log(command="show route 0.0.0.0 | display json | no-more\nDONE!",log_filename="ws_def_route.log",csv_output="RouteDefault.csv",description="Show default route"), "Run 'show route 0.0.0.0' on a selected device via shell session"),
     "39": (lambda: run_shell_command_and_log(command="show dhcp-security binding | display json | no-more\nDONE!",log_filename="ws_dhcp.log",csv_output="DhcpSecurityBindings.csv",description="Show DHCP security bindings"), "Run 'show dhcp-security binding' on a selected device via shell session"),
     "40": (lambda: run_shell_command_and_log(command="show vlans | display json | no-more\nDONE! ",log_filename="ws_vlans.log",csv_output="Vlans.csv",description="Show VLANs"), "Run 'show vlans' on a selected device via shell session"),
+    "41": (export_combined_inventory_with_site_info, "Export combined inventory with site and address info by calendar week"),
 }
 
 def main():
