@@ -1,129 +1,103 @@
-📡 MistHelper
-MistHelper is a comprehensive Python-based CLI and automation toolkit designed for Juniper Mist environments. It enables NOC engineers to efficiently extract, analyze, and interact with network data across sites, devices, and configurations using Mist APIs.
+# MistHelper
+
+MistHelper is a comprehensive Python CLI tool for interacting with the Juniper Mist API. It enables you to export, analyze, and manage data from your Mist organization, including sites, devices, alarms, events, and more. The tool is designed to minimize API usage by caching data in CSV files and supports both interactive and command-line modes.
+
+## Features
+
+- Export organization alarms, device events, audit logs, and inventory to CSV
+- Fetch and display device and site statistics
+- Export event and alarm definitions
+- Enrich device and gateway data with site/location info
+- Generate support packages for troubleshooting
+- Interactive CLI for device shell access and command execution
+- Rate-limited API calls with dynamic delay to avoid exceeding Mist API limits
+- Multi-threaded fast mode for bulk data collection
+- Data flattening and CSV-friendly formatting
+
+## Requirements
+
+- Python 3.7+
+- The following Python packages (auto-installed if missing):
+  - mistapi
+  - websocket-client
+  - pyte
+  - requests
+  - prettytable
+  - tqdm
+  - sshkeyboard
+  - numpy
+  - python-dotenv
+
+## Setup
+
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/yourusername/MistHelper.git
+   cd MistHelper
+   ```
+2. Create a `.env` file in the project directory with your Mist API credentials:
+   ```ini
+   MIST_HOST=api.mist.com
+   MIST_APITOKEN=your_api_token_here
+   org_id=your_org_id_here
+   ```
+3. Run the script. Required packages will be installed automatically if missing.
+
+## Usage
+
+You can run MistHelper in two modes:
+
+### Interactive Menu
+
+Simply run:
+```sh
+python MistHelper.py
+```
+You will be presented with a menu of available actions.
+
+### Command-Line Arguments
+
+You can also run specific actions directly:
+```sh
+python MistHelper.py --menu 1 --org your_org_id
+```
+
+#### Common Arguments
+- `-O`, `--org` : Organization ID
+- `-M`, `--menu` : Menu option number to execute (see below)
+- `-S`, `--site` : Human-readable site name
+- `-D`, `--device` : Human-readable device name
+- `-P`, `--port` : Port ID
+- `--debug` : Enable debug output
+- `--delay` : Fixed delay between loop iterations (in seconds)
+- `--fast` : Enable fast mode with multithreading
+
+## Menu Options
+
+| Option | Description |
+|--------|-------------|
+| 0      | Select a site (used by other functions) |
+| 1      | Export all organization alarms from the past day |
+| 2      | Export all device events from the past 24 hours |
+| 3      | Export audit logs for the organization |
+| ...    | ... (see script for full list) |
+
+For a full list of options, run the script without arguments.
+
+## Example: Export All Sites
+```sh
+python MistHelper.py --menu 11 --org your_org_id
+```
+
+## Data Caching
+
+MistHelper caches API responses in CSV files. If a CSV is fresh (default: 15 minutes), it will be used instead of making a new API call. This helps conserve API requests and avoid rate limits.
+
+## Support & Contributions
+
+- Issues and pull requests are welcome!
+- Please open an issue for bugs or feature requests.
+
+## License
 
-🚀 Features
-
-🔍 Audit & Alarm Logs: Export alarms, audit logs, and event definitions.
-
-🧠 Marvis Actions: Poll and export open Marvis AI actions.
-
-🧰 Device & Site Inventory: Export full org inventory, site lists, and enriched device metadata.
-
-📊 Statistics & Port Data: Gather device stats, port-level metrics, and VPN peer stats.
-
-🧪 Synthetic Tests: Collect synthetic test results from gateways.
-
-🧵 Virtual Chassis: Export switch stacking and VC stats.
-
-🖥️ Interactive CLI Shell: Launch WebSocket-based shell sessions to run commands like show route, show vlans, etc.
-
-🧾 Support Package Generator: Automatically compile per-site support packages with alarms, events, and performance data.
-
-🧠 Dynamic API Rate Control: PID-based delay tuning to avoid hitting Mist API rate limits.
-
-🧱 Requirements
-
-The script auto-installs required packages if missing:
-
-
-🔧 Setup
-
-Clone the repo or copy the script to your working directory.
-
-Create a .env file with your Mist credentials:
-
-Run the script:
-
-🖥️ Usage Modes
-
-🔹 Interactive Mode
-
-Run without arguments to access a menu-driven interface:
-
-
-🔹 CLI Mode
-
-Run specific tasks directly:
-
-
-📋 Menu Options Overview
-
-Option	Description
-
-1	Export all org alarms (last 24h)
-
-2	Export all device events
-
-11	Export site list
-
-12	Export org device inventory
-
-16	View site device inventory
-
-20	Export synthetic test results for all gateways
-
-29	Generate support packages per site
-
-33	Launch interactive CLI shell
-
-34	Run ARP command via WebSocket
-
-38	Run show route 0.0.0.0 and export to CSV
-
-40	Run show vlans and export to CSV
-
-📦 Support Package
-
-Generates per-site CSVs containing:
-
-Alarms
-
-Device events
-
-Device stats
-
-Port stats
-
-Speed test results
-
-Useful for escalations, audits, or proactive monitoring.
-
-🧠 Smart API Rate Handling
-
-The script uses a PID controller to dynamically adjust API call delays based on usage trends, ensuring compliance with Mist API rate limits.
-
-🛠️ Advanced Capabilities
-
-WebSocket Shell: Real-time CLI interaction with Mist devices.
-
-ARP Command Streaming: Trigger and stream ARP table output via WebSocket.
-
-Dynamic CSV Merging: Combine SFP module data with site/device metadata.
-
-JSON-to-CSV Conversion: Extract and flatten JSON from CLI output logs.
-
-📁 Output Files
-
-The script generates multiple CSVs including:
-
-OrgAlarms.csv
-
-OrgDeviceStats.csv
-
-AllDevicesWithSiteInfo.csv
-
-AllGatewaySyntheticTests.csv
-
-SupportPackage_<site_id>.csv
-
-🧪 Example: Run a Shell Command
-
-This runs show route 0.0.0.0 on the selected device and saves the output to RouteDefault.csv.
-
-🧼 Cleanup
-
-To stop continuous loops or refreshes, create a file named stop_loop.txt in the working directory.
-
-📞 Support
-
-For questions or issues, contact your network automation team or Mist API administrator.
+MIT License
